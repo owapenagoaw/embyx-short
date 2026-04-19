@@ -10,3 +10,8 @@ local.properties
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated diagnostics/logs
+*.log
+first_compiler_errors.txt
+log/

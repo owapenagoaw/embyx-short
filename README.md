@@ -5,6 +5,7 @@ EmbyX Short 是基于 Kotlin + Jetpack Compose 的安卓短视频流式播放器
 ## 仓库信息
 
 - 仓库名：`embyx-short`
+- 仓库地址：`https://github.com/owapenagoaw/embyx-short`
 - 应用包名：`com.lalakiop.embyx`
 - 最低系统版本：Android 7.0+（minSdk 24）
 
