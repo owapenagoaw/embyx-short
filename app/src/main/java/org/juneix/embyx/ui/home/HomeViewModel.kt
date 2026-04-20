@@ -12,6 +12,9 @@ import kotlinx.coroutines.launch
 import com.lalakiop.embyx.core.model.MediaLibrary
 import com.lalakiop.embyx.core.model.MediaLibraryType
 import com.lalakiop.embyx.data.local.HomeCacheStore
+import com.lalakiop.embyx.data.local.PlaybackHistoryMode
+import com.lalakiop.embyx.data.local.SequentialPlaybackState
+import com.lalakiop.embyx.data.local.SequentialPlaybackTable
 import com.lalakiop.embyx.data.local.UiSettingsStore
 import com.lalakiop.embyx.domain.usecase.GetFeedUseCase
 import com.lalakiop.embyx.domain.usecase.GetLibrariesUseCase
@@ -27,6 +30,7 @@ class HomeViewModel(
 
     private companion object {
         const val LIBRARY_PAGE_SIZE = 30
+        const val ALL_LIBRARY_KEY = "ALL::ALL"
     }
 
     data class PlaybackSnapshot(
@@ -38,30 +42,68 @@ class HomeViewModel(
     private val _uiState = MutableStateFlow(HomeUiState(isLoading = true))
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
     private var pendingPlaybackSnapshot: PlaybackSnapshot? = null
+    private var sequentialStates: MutableMap<String, SequentialPlaybackState> = mutableMapOf()
 
     init {
         viewModelScope.launch {
             val settings = uiSettingsStore.settingsFlow.first()
             val cached = homeCacheStore.readCache()
+            val sequentialTable = homeCacheStore.readSequentialTable()
+
+            sequentialStates = sequentialTable.states.toMutableMap()
+            val restoredLibraryId = sequentialTable.selectedLibraryId
+            val restoredLibraryType = sequentialTable.selectedLibraryType
+            val restoredSequentialState = if (settings.randomModeEnabled) {
+                null
+            } else {
+                sequentialStates[buildLibraryKey(restoredLibraryId, restoredLibraryType)]
+            }
 
             _uiState.update {
-                val safePage = if (cached.videos.isEmpty()) 0 else it.currentPage.coerceIn(0, cached.videos.lastIndex)
+                val startupVideos = when {
+                    restoredSequentialState?.videos?.isNotEmpty() == true -> restoredSequentialState.videos
+                    cached.videos.isNotEmpty() -> cached.videos
+                    else -> it.videos
+                }
+                val requestedPage = restoredSequentialState?.currentPage ?: it.currentPage
+                val safePage = if (startupVideos.isEmpty()) 0 else requestedPage.coerceIn(0, startupVideos.lastIndex)
                 it.copy(
-                    isLoading = cached.videos.isEmpty(),
-                    videos = if (cached.videos.isNotEmpty()) cached.videos else it.videos,
+                    isLoading = startupVideos.isEmpty(),
+                    videos = startupVideos,
                     libraries = if (cached.libraries.isNotEmpty()) cached.libraries else it.libraries,
                     isRandomMode = settings.randomModeEnabled,
+                    selectedLibraryId = restoredLibraryId,
+                    selectedLibraryType = restoredLibraryType,
                     currentPage = safePage,
+                    isPlaying = restoredSequentialState?.wasPlaying ?: it.isPlaying,
                     errorMessage = null
                 )
             }
 
+            if (restoredSequentialState != null && restoredSequentialState.videos.isNotEmpty()) {
+                val safePage = restoredSequentialState.currentPage
+                    .coerceIn(0, (restoredSequentialState.videos.size - 1).coerceAtLeast(0))
+                pendingPlaybackSnapshot = PlaybackSnapshot(
+                    page = safePage,
+                    positionMs = restoredSequentialState.positionMs.coerceAtLeast(0L),
+                    wasPlaying = restoredSequentialState.wasPlaying
+                )
+            }
+
             loadLibraries()
-            refresh(
-                random = settings.randomModeEnabled,
-                resetPage = false,
-                showLoading = cached.videos.isEmpty()
-            )
+            if (settings.randomModeEnabled) {
+                refresh(
+                    random = true,
+                    resetPage = false,
+                    showLoading = cached.videos.isEmpty()
+                )
+            } else if (restoredSequentialState == null || restoredSequentialState.videos.isEmpty()) {
+                refresh(
+                    random = false,
+                    resetPage = false,
+                    showLoading = cached.videos.isEmpty()
+                )
+            }
         }
     }
 
@@ -86,18 +128,33 @@ class HomeViewModel(
             result
                 .onSuccess { videos ->
                     homeCacheStore.saveVideos(videos)
+
+                    var resolvedPage = 0
                     _uiState.update {
                         val safePage = when {
                             videos.isEmpty() -> 0
                             resetPage -> 0
                             else -> it.currentPage.coerceIn(0, videos.lastIndex)
                         }
+                        resolvedPage = safePage
                         it.copy(
                             isLoading = false,
                             videos = videos,
                             errorMessage = null,
                             currentPage = safePage
                         )
+                    }
+
+                    if (!random) {
+                        val state = _uiState.value
+                        sequentialStates[currentLibraryKey(state)] = SequentialPlaybackState(
+                            videos = videos,
+                            currentPage = resolvedPage,
+                            positionMs = 0L,
+                            wasPlaying = state.isPlaying,
+                            updatedAtMs = System.currentTimeMillis()
+                        )
+                        persistSequentialTable(state)
                     }
                 }
                 .onFailure { throwable ->
@@ -116,18 +173,28 @@ class HomeViewModel(
             getLibrariesUseCase()
                 .onSuccess { libraries ->
                     homeCacheStore.saveLibraries(libraries)
+
+                    var shouldPersistSelection = false
                     _uiState.update {
                         val selectedId = it.selectedLibraryId
                         val selectedType = it.selectedLibraryType
-                        if (selectedId != null && selectedType != null) {
+                        val selectionExists = selectedId != null && selectedType != null && libraries.any { library ->
+                            library.id == selectedId && library.type == selectedType
+                        }
+                        if (selectionExists) {
                             it.copy(libraries = libraries)
                         } else {
+                            shouldPersistSelection = selectedId != null || selectedType != null
                             it.copy(
                                 libraries = libraries,
                                 selectedLibraryId = null,
                                 selectedLibraryType = null
                             )
                         }
+                    }
+
+                    if (shouldPersistSelection) {
+                        persistSequentialTable(_uiState.value)
                     }
                 }
                 .onFailure { throwable ->
@@ -139,13 +206,37 @@ class HomeViewModel(
     }
 
     fun selectLibrary(library: MediaLibrary?) {
-        _uiState.update {
-            it.copy(
-                selectedLibraryId = library?.takeIf { lib -> lib.type != MediaLibraryType.FAVORITES }?.id,
-                selectedLibraryType = library?.type
+        val previousState = _uiState.value
+        if (!previousState.isRandomMode) {
+            saveCurrentSequentialState(
+                positionMs = null,
+                wasPlaying = previousState.isPlaying,
+                page = previousState.currentPage
             )
         }
-        refresh(showLoading = true)
+
+        val selectedLibraryId = library?.takeIf { lib -> lib.type != MediaLibraryType.FAVORITES }?.id
+        val selectedLibraryType = library?.type
+        _uiState.update {
+            it.copy(
+                selectedLibraryId = selectedLibraryId,
+                selectedLibraryType = selectedLibraryType
+            )
+        }
+
+        val state = _uiState.value
+        viewModelScope.launch {
+            persistSequentialTable(state)
+        }
+
+        if (state.isRandomMode) {
+            refresh(random = true, resetPage = true, showLoading = true)
+            return
+        }
+
+        if (!restoreSequentialStateForCurrentLibrary()) {
+            refresh(random = false, resetPage = false, showLoading = true)
+        }
     }
 
     fun openLibraryBrowser(library: MediaLibrary) {
@@ -255,10 +346,21 @@ class HomeViewModel(
         _uiState.update {
             it.copy(currentPage = safeIndex, isPlaying = true)
         }
+        recordHistoryAtPage(safeIndex)
     }
 
     fun toggleRandomMode() {
         val enabled = !_uiState.value.isRandomMode
+        val current = _uiState.value
+
+        if (enabled && !current.isRandomMode) {
+            saveCurrentSequentialState(
+                positionMs = null,
+                wasPlaying = current.isPlaying,
+                page = current.currentPage
+            )
+        }
+
         _uiState.update {
             it.copy(
                 isRandomMode = enabled,
@@ -268,14 +370,33 @@ class HomeViewModel(
         viewModelScope.launch {
             uiSettingsStore.setRandomModeEnabled(enabled)
         }
-        refresh(random = enabled, resetPage = true, showLoading = false)
+
+        if (enabled) {
+            refresh(random = true, resetPage = true, showLoading = false)
+            return
+        }
+
+        if (!restoreSequentialStateForCurrentLibrary()) {
+            refresh(random = false, resetPage = false, showLoading = false)
+        }
     }
 
     fun onPageChanged(page: Int) {
+        var safePage = 0
         _uiState.update {
-            val safePage = page.coerceIn(0, (it.videos.size - 1).coerceAtLeast(0))
+            safePage = page.coerceIn(0, (it.videos.size - 1).coerceAtLeast(0))
             it.copy(currentPage = safePage, isPlaying = true)
         }
+
+        if (!_uiState.value.isRandomMode) {
+            saveCurrentSequentialState(
+                positionMs = null,
+                wasPlaying = true,
+                page = safePage
+            )
+        }
+
+        recordHistoryAtPage(safePage)
     }
 
     fun toggleMuted() {
@@ -300,6 +421,14 @@ class HomeViewModel(
             positionMs = positionMs.coerceAtLeast(0L),
             wasPlaying = wasPlaying
         )
+
+        if (!_uiState.value.isRandomMode) {
+            saveCurrentSequentialState(
+                positionMs = positionMs,
+                wasPlaying = wasPlaying,
+                page = page
+            )
+        }
     }
 
     fun consumePlaybackSnapshot(expectedPage: Int): PlaybackSnapshot? {
@@ -350,6 +479,109 @@ class HomeViewModel(
                         )
                     }
                 }
+        }
+    }
+
+    private fun buildLibraryKey(
+        libraryId: String?,
+        libraryType: MediaLibraryType?
+    ): String {
+        if (libraryId == null && libraryType == null) {
+            return ALL_LIBRARY_KEY
+        }
+        val typePart = libraryType?.name ?: "ALL"
+        val idPart = libraryId ?: "ALL"
+        return "$typePart::$idPart"
+    }
+
+    private fun currentLibraryKey(state: HomeUiState = _uiState.value): String {
+        return buildLibraryKey(
+            libraryId = state.selectedLibraryId,
+            libraryType = state.selectedLibraryType
+        )
+    }
+
+    private fun restoreSequentialStateForCurrentLibrary(): Boolean {
+        val state = _uiState.value
+        val sequentialState = sequentialStates[currentLibraryKey(state)] ?: return false
+        if (sequentialState.videos.isEmpty()) {
+            return false
+        }
+
+        val safePage = sequentialState.currentPage
+            .coerceIn(0, (sequentialState.videos.size - 1).coerceAtLeast(0))
+
+        _uiState.update {
+            it.copy(
+                isLoading = false,
+                videos = sequentialState.videos,
+                currentPage = safePage,
+                isPlaying = sequentialState.wasPlaying,
+                errorMessage = null
+            )
+        }
+
+        pendingPlaybackSnapshot = PlaybackSnapshot(
+            page = safePage,
+            positionMs = sequentialState.positionMs.coerceAtLeast(0L),
+            wasPlaying = sequentialState.wasPlaying
+        )
+
+        return true
+    }
+
+    private fun saveCurrentSequentialState(
+        positionMs: Long?,
+        wasPlaying: Boolean?,
+        page: Int?
+    ) {
+        val state = _uiState.value
+        val key = currentLibraryKey(state)
+        val existing = sequentialStates[key]
+        val videos = if (state.videos.isNotEmpty()) state.videos else existing?.videos.orEmpty()
+        if (videos.isEmpty()) {
+            return
+        }
+
+        val requestedPage = page ?: state.currentPage
+        val safePage = requestedPage.coerceIn(0, videos.lastIndex)
+
+        sequentialStates[key] = SequentialPlaybackState(
+            videos = videos,
+            currentPage = safePage,
+            positionMs = (positionMs ?: existing?.positionMs ?: 0L).coerceAtLeast(0L),
+            wasPlaying = wasPlaying ?: state.isPlaying,
+            updatedAtMs = System.currentTimeMillis()
+        )
+
+        viewModelScope.launch {
+            persistSequentialTable(state)
+        }
+    }
+
+    private suspend fun persistSequentialTable(state: HomeUiState) {
+        homeCacheStore.saveSequentialTable(
+            SequentialPlaybackTable(
+                selectedLibraryId = state.selectedLibraryId,
+                selectedLibraryType = state.selectedLibraryType,
+                states = sequentialStates.toMap()
+            )
+        )
+    }
+
+    private fun recordHistoryAtPage(page: Int) {
+        val state = _uiState.value
+        val item = state.videos.getOrNull(page) ?: return
+        val sourceName = state.libraries.firstOrNull {
+            it.id == state.selectedLibraryId && it.type == state.selectedLibraryType
+        }?.name
+
+        viewModelScope.launch {
+            homeCacheStore.recordHistory(
+                mode = if (state.isRandomMode) PlaybackHistoryMode.RANDOM else PlaybackHistoryMode.SEQUENTIAL,
+                video = item,
+                sourceName = sourceName
+            )
         }
     }
 

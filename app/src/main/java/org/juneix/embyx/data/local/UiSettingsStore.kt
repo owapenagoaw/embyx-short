@@ -28,7 +28,8 @@ data class UiSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val allowScreenOffPlayback: Boolean = false,
     val randomModeEnabled: Boolean = false,
-    val preferredPlaybackPresetId: String = PlaybackQualityPresets.ORIGINAL.id
+    val preferredPlaybackPresetId: String = PlaybackQualityPresets.ORIGINAL.id,
+    val debugOverlayEnabled: Boolean = false
 )
 
 class UiSettingsStore(private val context: Context) {
@@ -38,6 +39,7 @@ class UiSettingsStore(private val context: Context) {
         val allowScreenOffPlayback = booleanPreferencesKey("allow_screen_off_playback")
         val randomModeEnabled = booleanPreferencesKey("random_mode_enabled")
         val preferredPlaybackPresetId = stringPreferencesKey("preferred_playback_preset_id")
+        val debugOverlayEnabled = booleanPreferencesKey("debug_overlay_enabled")
     }
 
     val settingsFlow: Flow<UiSettings> = context.uiSettingsDataStore.data.map { prefs: Preferences ->
@@ -45,7 +47,8 @@ class UiSettingsStore(private val context: Context) {
             themeMode = ThemeMode.fromValue(prefs[Keys.themeMode]),
             allowScreenOffPlayback = prefs[Keys.allowScreenOffPlayback] ?: false,
             randomModeEnabled = prefs[Keys.randomModeEnabled] ?: false,
-            preferredPlaybackPresetId = prefs[Keys.preferredPlaybackPresetId] ?: PlaybackQualityPresets.ORIGINAL.id
+            preferredPlaybackPresetId = prefs[Keys.preferredPlaybackPresetId] ?: PlaybackQualityPresets.ORIGINAL.id,
+            debugOverlayEnabled = prefs[Keys.debugOverlayEnabled] ?: false
         )
     }
 
@@ -70,6 +73,12 @@ class UiSettingsStore(private val context: Context) {
     suspend fun setPreferredPlaybackPresetId(presetId: String) {
         context.uiSettingsDataStore.edit { prefs ->
             prefs[Keys.preferredPlaybackPresetId] = PlaybackQualityPresets.findById(presetId).id
+        }
+    }
+
+    suspend fun setDebugOverlayEnabled(enabled: Boolean) {
+        context.uiSettingsDataStore.edit { prefs ->
+            prefs[Keys.debugOverlayEnabled] = enabled
         }
     }
 }

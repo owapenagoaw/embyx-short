@@ -3,7 +3,8 @@ package com.lalakiop.embyx.data.remote.model
 import com.google.gson.annotations.SerializedName
 
 data class ItemsResponse(
-    @SerializedName("Items") val items: List<ItemDto>?
+    @SerializedName("Items") val items: List<ItemDto>?,
+    @SerializedName("TotalRecordCount") val totalRecordCount: Int?
 )
 
 data class ViewsResponse(

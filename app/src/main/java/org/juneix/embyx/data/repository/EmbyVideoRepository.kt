@@ -1,6 +1,9 @@
 package com.lalakiop.embyx.data.repository
 
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import com.lalakiop.embyx.core.model.MediaLibrary
 import com.lalakiop.embyx.core.model.MediaLibraryType
 import com.lalakiop.embyx.core.model.PlaybackQualityPreset
@@ -17,11 +20,28 @@ import com.lalakiop.embyx.data.remote.model.ResponseProfileRequest
 import com.lalakiop.embyx.data.remote.model.SubtitleProfileRequest
 import com.lalakiop.embyx.data.remote.model.TranscodingProfileRequest
 import java.io.IOException
+import kotlin.random.Random
 
 class EmbyVideoRepository(
     private val sessionStore: SessionStore,
     private val apiClientFactory: ApiClientFactory
 ) : VideoRepository {
+
+    private data class WeightedLibrary(
+        val id: String,
+        val weight: Int
+    )
+
+    private data class LibraryWeightsCache(
+        val weightsByLibraryId: Map<String, Int>,
+        val updatedAtMs: Long
+    )
+
+    private var libraryWeightsCache: LibraryWeightsCache? = null
+
+    companion object {
+        private const val LIBRARY_WEIGHTS_CACHE_TTL_MS = 10 * 60 * 1000L
+    }
 
     override suspend fun getFeed(
         parentId: String?,
@@ -41,14 +61,25 @@ class EmbyVideoRepository(
                 token = session.token
             )
 
+            val effectiveParentId = if (random && parentId == null && !favoritesOnly) {
+                pickWeightedRandomLibraryId(
+                    api = api,
+                    userId = session.userId
+                )
+            } else {
+                parentId
+            }
+
             val response = api.getVideos(
                 userId = session.userId,
                 limit = limit,
                 startIndex = startIndex,
-                parentId = parentId,
+                parentId = effectiveParentId,
                 filters = if (favoritesOnly) "IsFavorite" else null,
                 sortBy = if (random) "Random" else "DateCreated",
-                sortOrder = if (random) null else "Descending"
+                sortOrder = if (random) null else "Descending",
+                enableTotalRecordCount = true,
+                randomSeed = if (random) Random.nextInt() else null
             )
 
             if (!response.isSuccessful) {
@@ -92,41 +123,7 @@ class EmbyVideoRepository(
                 token = session.token
             )
 
-            val playlistsResponse = api.getPlaylists(userId = session.userId)
-            val viewsResponse = api.getViews(userId = session.userId)
-
-            val playlists = if (playlistsResponse.isSuccessful) {
-                playlistsResponse.body()?.items.orEmpty().map {
-                    MediaLibrary(
-                        id = it.id,
-                        name = it.name ?: "未命名播放列表",
-                        type = MediaLibraryType.PLAYLIST
-                    )
-                }
-            } else {
-                emptyList()
-            }
-
-            val views = if (viewsResponse.isSuccessful) {
-                viewsResponse.body()?.items.orEmpty()
-                    .filterNot { dto ->
-                        dto.collectionType == "playlists" || dto.collectionType == "boxsets"
-                    }
-                    .map {
-                        MediaLibrary(
-                            id = it.id,
-                            name = it.name ?: "未命名媒体库",
-                            type = MediaLibraryType.LIBRARY
-                        )
-                    }
-            } else {
-                emptyList()
-            }
-
-            buildList {
-                addAll(playlists)
-                addAll(views)
-            }
+            fetchPlayableLibraries(api = api, userId = session.userId)
         }.recoverCatching { throwable ->
             when (throwable) {
                 is IOException -> throw IllegalStateException("网络连接失败，无法加载媒体库")
@@ -219,6 +216,153 @@ class EmbyVideoRepository(
                 else -> throw throwable
             }
         }
+    }
+
+    private suspend fun fetchPlayableLibraries(
+        api: com.lalakiop.embyx.data.remote.EmbyMediaApi,
+        userId: String
+    ): List<MediaLibrary> {
+        val playlistsResponse = api.getPlaylists(userId = userId)
+        val viewsResponse = api.getViews(userId = userId)
+
+        val playlists = if (playlistsResponse.isSuccessful) {
+            playlistsResponse.body()?.items.orEmpty().map {
+                MediaLibrary(
+                    id = it.id,
+                    name = it.name ?: "未命名播放列表",
+                    type = MediaLibraryType.PLAYLIST
+                )
+            }
+        } else {
+            emptyList()
+        }
+
+        val views = if (viewsResponse.isSuccessful) {
+            viewsResponse.body()?.items.orEmpty()
+                .filterNot { dto ->
+                    dto.collectionType == "playlists" || dto.collectionType == "boxsets"
+                }
+                .map {
+                    MediaLibrary(
+                        id = it.id,
+                        name = it.name ?: "未命名媒体库",
+                        type = MediaLibraryType.LIBRARY
+                    )
+                }
+        } else {
+            emptyList()
+        }
+
+        return buildList {
+            addAll(playlists)
+            addAll(views)
+        }
+    }
+
+    private suspend fun pickWeightedRandomLibraryId(
+        api: com.lalakiop.embyx.data.remote.EmbyMediaApi,
+        userId: String
+    ): String? {
+        val libraries = fetchPlayableLibraries(api = api, userId = userId)
+        if (libraries.isEmpty()) {
+            return null
+        }
+
+        val weightsByLibraryId = resolveLibraryWeights(
+            api = api,
+            userId = userId,
+            libraries = libraries
+        )
+
+        val weightedLibraries = libraries.mapNotNull { library ->
+            val weight = (weightsByLibraryId[library.id] ?: 0).coerceAtLeast(0)
+            if (weight <= 0) {
+                null
+            } else {
+                WeightedLibrary(id = library.id, weight = weight)
+            }
+        }
+
+        if (weightedLibraries.isEmpty()) {
+            return null
+        }
+
+        val totalWeight = weightedLibraries.sumOf { it.weight }
+        if (totalWeight <= 0) {
+            return weightedLibraries.random().id
+        }
+
+        var cursor = Random.nextInt(totalWeight)
+        weightedLibraries.forEach { candidate ->
+            cursor -= candidate.weight
+            if (cursor < 0) {
+                return candidate.id
+            }
+        }
+
+        return weightedLibraries.last().id
+    }
+
+    private suspend fun resolveLibraryWeights(
+        api: com.lalakiop.embyx.data.remote.EmbyMediaApi,
+        userId: String,
+        libraries: List<MediaLibrary>
+    ): Map<String, Int> {
+        val now = System.currentTimeMillis()
+        val cached = libraryWeightsCache
+        val hasAllLibraries = cached?.weightsByLibraryId?.keys?.containsAll(libraries.map { it.id }) == true
+        val cacheValid = cached != null && hasAllLibraries && now - cached.updatedAtMs <= LIBRARY_WEIGHTS_CACHE_TTL_MS
+        if (cacheValid) {
+            return cached!!.weightsByLibraryId
+        }
+
+        val refreshed = coroutineScope {
+            libraries
+                .map { library ->
+                    async {
+                        library.id to fetchLibraryItemCount(
+                            api = api,
+                            userId = userId,
+                            parentId = library.id
+                        )
+                    }
+                }
+                .awaitAll()
+                .toMap()
+        }
+
+        libraryWeightsCache = LibraryWeightsCache(
+            weightsByLibraryId = refreshed,
+            updatedAtMs = now
+        )
+
+        return refreshed
+    }
+
+    private suspend fun fetchLibraryItemCount(
+        api: com.lalakiop.embyx.data.remote.EmbyMediaApi,
+        userId: String,
+        parentId: String
+    ): Int {
+        return runCatching {
+            val response = api.getVideos(
+                userId = userId,
+                parentId = parentId,
+                limit = 1,
+                startIndex = 0,
+                sortBy = "DateCreated",
+                sortOrder = "Descending",
+                enableTotalRecordCount = true,
+                randomSeed = null
+            )
+
+            if (!response.isSuccessful) {
+                return 0
+            }
+
+            val body = response.body()
+            (body?.totalRecordCount ?: body?.items?.size ?: 0).coerceAtLeast(0)
+        }.getOrDefault(0)
     }
 
     private fun buildPlaybackInfoRequest(maxWidth: Int): PlaybackInfoRequest {

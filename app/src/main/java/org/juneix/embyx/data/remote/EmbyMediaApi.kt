@@ -24,7 +24,9 @@ interface EmbyMediaApi {
         @Query("ParentId") parentId: String? = null,
         @Query("Filters") filters: String? = null,
         @Query("SortBy") sortBy: String? = "DateCreated",
-        @Query("SortOrder") sortOrder: String? = "Descending"
+        @Query("SortOrder") sortOrder: String? = "Descending",
+        @Query("EnableTotalRecordCount") enableTotalRecordCount: Boolean = true,
+        @Query("RandomSeed") randomSeed: Int? = null
     ): Response<ItemsResponse>
 
     @GET("emby/Users/{userId}/Views")

@@ -12,12 +12,15 @@ import com.lalakiop.embyx.domain.repository.AuthRepository
 import com.lalakiop.embyx.domain.usecase.GetFeedUseCase
 import com.lalakiop.embyx.domain.usecase.GetLibrariesUseCase
 import com.lalakiop.embyx.domain.usecase.SetFavoriteUseCase
+import com.lalakiop.embyx.player.PlayerRuntimeConfig
 
 class AppContainer(context: Context) {
+    private val appContext = context.applicationContext
     private val sessionStore = SessionStore(context.applicationContext)
     val uiSettingsStore = UiSettingsStore(context.applicationContext)
     val homeCacheStore = HomeCacheStore(context.applicationContext)
     private val apiClientFactory = ApiClientFactory()
+    private val playerRuntimeConfig = PlayerRuntimeConfig(appContext)
 
     val authRepository: AuthRepository = AuthRepositoryImpl(
         sessionStore = sessionStore,
@@ -32,4 +35,10 @@ class AppContainer(context: Context) {
     val getFeedUseCase = GetFeedUseCase(videoRepository)
     val getLibrariesUseCase = GetLibrariesUseCase(videoRepository)
     val setFavoriteUseCase = SetFavoriteUseCase(videoRepository)
+
+    fun newPlayerLoadControl() = playerRuntimeConfig.newLoadControl()
+
+    fun newCachedMediaSourceFactory() = playerRuntimeConfig.newMediaSourceFactory()
+
+    fun playerCacheDirectory() = playerRuntimeConfig.cacheDirectory()
 }

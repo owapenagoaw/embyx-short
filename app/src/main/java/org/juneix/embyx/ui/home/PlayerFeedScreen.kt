@@ -90,8 +90,9 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
-import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import androidx.core.view.WindowCompat
@@ -106,8 +107,10 @@ import com.lalakiop.embyx.core.model.MediaLibraryType
 import com.lalakiop.embyx.core.model.PlaybackQualityPreset
 import com.lalakiop.embyx.core.model.PlaybackQualityPresets
 import com.lalakiop.embyx.data.local.UiSettings
+import com.lalakiop.embyx.ui.debug.PlaybackDebugRegistry
 
 @Composable
+@OptIn(UnstableApi::class)
 fun PlayerFeedScreen(
     viewModel: HomeViewModel,
     contentPadding: PaddingValues = PaddingValues(0.dp),
@@ -166,19 +169,8 @@ fun PlayerFeedScreen(
 
     val player0 = remember {
         ExoPlayer.Builder(context)
-            .setLoadControl(
-                DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(
-                        15_000,
-                        45_000,
-                        500,
-                        1_500
-                    )
-                    .setBackBuffer(30_000, false)
-                    .setTargetBufferBytes(6 * 1024 * 1024)
-                    .setPrioritizeTimeOverSizeThresholds(true)
-                    .build()
-            )
+            .setLoadControl(app.appContainer.newPlayerLoadControl())
+            .setMediaSourceFactory(app.appContainer.newCachedMediaSourceFactory())
             .build()
             .apply {
                 playWhenReady = true
@@ -187,24 +179,50 @@ fun PlayerFeedScreen(
     }
     val player1 = remember {
         ExoPlayer.Builder(context)
-            .setLoadControl(
-                DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(
-                        15_000,
-                        45_000,
-                        500,
-                        1_500
-                    )
-                    .setBackBuffer(30_000, false)
-                    .setTargetBufferBytes(6 * 1024 * 1024)
-                    .setPrioritizeTimeOverSizeThresholds(true)
-                    .build()
-            )
+            .setLoadControl(app.appContainer.newPlayerLoadControl())
+            .setMediaSourceFactory(app.appContainer.newCachedMediaSourceFactory())
             .build()
             .apply {
                 playWhenReady = false
                 repeatMode = ExoPlayer.REPEAT_MODE_ONE
             }
+    }
+
+    DisposableEffect(player0, player1) {
+        val source0 = "home_p0"
+        val source1 = "home_p1"
+
+        val listener0 = object : AnalyticsListener {
+            override fun onVideoDecoderInitialized(
+                eventTime: AnalyticsListener.EventTime,
+                decoderName: String,
+                initializedTimestampMs: Long,
+                initializationDurationMs: Long
+            ) {
+                PlaybackDebugRegistry.updateDecoder(source0, decoderName)
+            }
+        }
+
+        val listener1 = object : AnalyticsListener {
+            override fun onVideoDecoderInitialized(
+                eventTime: AnalyticsListener.EventTime,
+                decoderName: String,
+                initializedTimestampMs: Long,
+                initializationDurationMs: Long
+            ) {
+                PlaybackDebugRegistry.updateDecoder(source1, decoderName)
+            }
+        }
+
+        player0.addAnalyticsListener(listener0)
+        player1.addAnalyticsListener(listener1)
+
+        onDispose {
+            player0.removeAnalyticsListener(listener0)
+            player1.removeAnalyticsListener(listener1)
+            PlaybackDebugRegistry.clearSource(source0)
+            PlaybackDebugRegistry.clearSource(source1)
+        }
     }
 
     fun playerFor(slot: Int): ExoPlayer = if (slot == 0) player0 else player1
@@ -385,9 +403,7 @@ fun PlayerFeedScreen(
             }
         }
 
-        val inactivePlayer = playerFor(inactiveSlot)
-        inactivePlayer.pause()
-        inactivePlayer.playWhenReady = false
+        clearSlot(inactiveSlot)
     }
 
     LaunchedEffect(allowScreenOffPlayback) {
@@ -502,6 +518,7 @@ fun PlayerFeedScreen(
                     val nextActive = 1 - previousActive
                     prepareSlot(nextActive, targetPage, play = true)
                     activeSlot = nextActive
+                    clearSlot(previousActive)
                     displayPageState = targetPage
                     awaitingViewModelPageSync = true
                     viewModel.onPageChanged(targetPage)
@@ -796,19 +813,6 @@ fun PlayerFeedScreen(
                                     pendingPageDelta = delta
                                     isDraggingPreview = false
                                     swipeBasePage = displayPage
-
-                                    if (delta != 0) {
-                                        val targetPage = nextPageByDirection(
-                                            currentPage = displayPage,
-                                            direction = delta,
-                                            lastIndex = state.videos.lastIndex
-                                        )
-                                        if (targetPage != null && targetPage != displayPage) {
-                                            val incomingSlot = 1 - activeSlot
-                                            // Load next video only after finger release.
-                                            prepareSlot(incomingSlot, targetPage, play = false)
-                                        }
-                                    }
 
                                     snapTargetOffsetY = when (delta) {
                                         1 -> -containerHeight

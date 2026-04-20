@@ -34,8 +34,10 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.lalakiop.embyx.EmbyXApp
 import com.lalakiop.embyx.data.local.ThemeMode
+import com.lalakiop.embyx.data.local.PlaybackHistoryEntry
 import com.lalakiop.embyx.ui.auth.AuthViewModel
 import com.lalakiop.embyx.ui.auth.LoginScreen
+import com.lalakiop.embyx.ui.debug.DebugMetricsOverlay
 import com.lalakiop.embyx.ui.home.FavoritesScreen
 import com.lalakiop.embyx.ui.home.FavoritesViewModel
 import com.lalakiop.embyx.ui.home.HomeViewModel
@@ -92,110 +94,138 @@ fun EmbyXRoot() {
                 homeCacheStore = app.appContainer.homeCacheStore
             )
         )
+        val homeState by homeViewModel.uiState.collectAsStateWithLifecycle()
+        val randomHistory by app.appContainer.homeCacheStore.randomHistoryFlow.collectAsStateWithLifecycle(
+            initialValue = emptyList<PlaybackHistoryEntry>()
+        )
+        val sequentialHistory by app.appContainer.homeCacheStore.sequentialHistoryFlow.collectAsStateWithLifecycle(
+            initialValue = emptyList<PlaybackHistoryEntry>()
+        )
+        val playlists by app.appContainer.homeCacheStore.playlistsFlow.collectAsStateWithLifecycle(
+            initialValue = emptyList()
+        )
 
         val navController = rememberNavController()
         var homeFullscreen by remember { mutableStateOf(false) }
         var overlayPlayerFullscreen by remember { mutableStateOf(false) }
 
-        Scaffold(
-            modifier = Modifier.fillMaxSize(),
-            bottomBar = {
-                if (!homeFullscreen && !overlayPlayerFullscreen) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 0.dp, vertical = 0.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
-                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
-                            tonalElevation = 0.dp,
-                            shadowElevation = 0.dp
+        Box(modifier = Modifier.fillMaxSize()) {
+            Scaffold(
+                modifier = Modifier.fillMaxSize(),
+                bottomBar = {
+                    if (!homeFullscreen && !overlayPlayerFullscreen) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 0.dp, vertical = 0.dp),
+                            contentAlignment = Alignment.Center
                         ) {
-                            NavigationBar(
-                                containerColor = Color.Transparent,
-                                tonalElevation = 0.dp
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
+                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                                tonalElevation = 0.dp,
+                                shadowElevation = 0.dp
                             ) {
-                                BottomTabs.entries.forEach { tab ->
-                                    val navBackStackEntry by navController.currentBackStackEntryAsState()
-                                    val currentDestination = navBackStackEntry?.destination
-                                    val selected = currentDestination?.hierarchy?.any { it.route == tab.route } == true
+                                NavigationBar(
+                                    containerColor = Color.Transparent,
+                                    tonalElevation = 0.dp
+                                ) {
+                                    BottomTabs.entries.forEach { tab ->
+                                        val navBackStackEntry by navController.currentBackStackEntryAsState()
+                                        val currentDestination = navBackStackEntry?.destination
+                                        val selected = currentDestination?.hierarchy?.any { it.route == tab.route } == true
 
-                                    NavigationBarItem(
-                                        selected = selected,
-                                        onClick = {
-                                            navController.navigate(tab.route) {
-                                                popUpTo(navController.graph.findStartDestination().id) {
-                                                    saveState = true
+                                        NavigationBarItem(
+                                            selected = selected,
+                                            onClick = {
+                                                navController.navigate(tab.route) {
+                                                    popUpTo(navController.graph.findStartDestination().id) {
+                                                        saveState = true
+                                                    }
+                                                    launchSingleTop = true
+                                                    restoreState = true
                                                 }
-                                                launchSingleTop = true
-                                                restoreState = true
-                                            }
-                                        },
-                                        icon = { Icon(imageVector = tab.icon, contentDescription = tab.label) },
-                                        label = { Text(tab.label) }
-                                    )
+                                            },
+                                            icon = { Icon(imageVector = tab.icon, contentDescription = tab.label) },
+                                            label = { Text(tab.label) }
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-        ) { innerPadding ->
-            NavHost(
-                navController = navController,
-                startDestination = BottomTabs.Home.route
-            ) {
-                composable(BottomTabs.Home.route) {
-                    PlayerFeedScreen(
-                        viewModel = homeViewModel,
-                        contentPadding = innerPadding,
-                        allowScreenOffPlayback = uiSettings.allowScreenOffPlayback,
-                        onFullscreenChange = { fullscreen ->
-                            homeFullscreen = fullscreen
-                        }
-                    )
-                }
-                composable(BottomTabs.Library.route) {
-                    LibraryScreen(
-                        viewModel = homeViewModel,
-                        contentPadding = innerPadding,
-                        onPlayerFullscreenChange = { fullscreen ->
-                            overlayPlayerFullscreen = fullscreen
-                        }
-                    )
-                }
-                composable(BottomTabs.Favorites.route) {
-                    FavoritesScreen(
-                        viewModel = favoritesViewModel,
-                        contentPadding = innerPadding,
-                        allowScreenOffPlayback = uiSettings.allowScreenOffPlayback,
-                        onPlayerFullscreenChange = { fullscreen ->
-                            overlayPlayerFullscreen = fullscreen
-                        }
-                    )
-                }
-                composable(BottomTabs.Profile.route) {
-                    ProfileScreen(
-                        session = authState.session,
-                        themeMode = uiSettings.themeMode,
-                        allowScreenOffPlayback = uiSettings.allowScreenOffPlayback,
-                        onThemeModeChange = { mode: ThemeMode ->
-                            scope.launch {
-                                app.appContainer.uiSettingsStore.setThemeMode(mode)
+            ) { innerPadding ->
+                NavHost(
+                    navController = navController,
+                    startDestination = BottomTabs.Home.route
+                ) {
+                    composable(BottomTabs.Home.route) {
+                        PlayerFeedScreen(
+                            viewModel = homeViewModel,
+                            contentPadding = innerPadding,
+                            allowScreenOffPlayback = uiSettings.allowScreenOffPlayback,
+                            onFullscreenChange = { fullscreen ->
+                                homeFullscreen = fullscreen
                             }
-                        },
-                        onScreenOffPlaybackChange = { enabled: Boolean ->
-                            scope.launch {
-                                app.appContainer.uiSettingsStore.setAllowScreenOffPlayback(enabled)
+                        )
+                    }
+                    composable(BottomTabs.Library.route) {
+                        LibraryScreen(
+                            viewModel = homeViewModel,
+                            contentPadding = innerPadding,
+                            onPlayerFullscreenChange = { fullscreen ->
+                                overlayPlayerFullscreen = fullscreen
                             }
-                        },
-                        onLogoutClick = authViewModel::logout
-                    )
+                        )
+                    }
+                    composable(BottomTabs.Favorites.route) {
+                        FavoritesScreen(
+                            viewModel = favoritesViewModel,
+                            contentPadding = innerPadding,
+                            allowScreenOffPlayback = uiSettings.allowScreenOffPlayback,
+                            onPlayerFullscreenChange = { fullscreen ->
+                                overlayPlayerFullscreen = fullscreen
+                            }
+                        )
+                    }
+                    composable(BottomTabs.Profile.route) {
+                        ProfileScreen(
+                            session = authState.session,
+                            themeMode = uiSettings.themeMode,
+                            allowScreenOffPlayback = uiSettings.allowScreenOffPlayback,
+                            debugOverlayEnabled = uiSettings.debugOverlayEnabled,
+                            playlists = playlists.ifEmpty {
+                                homeState.libraries.filter { it.type == com.lalakiop.embyx.core.model.MediaLibraryType.PLAYLIST }
+                            },
+                            randomHistory = randomHistory,
+                            sequentialHistory = sequentialHistory,
+                            onThemeModeChange = { mode: ThemeMode ->
+                                scope.launch {
+                                    app.appContainer.uiSettingsStore.setThemeMode(mode)
+                                }
+                            },
+                            onScreenOffPlaybackChange = { enabled: Boolean ->
+                                scope.launch {
+                                    app.appContainer.uiSettingsStore.setAllowScreenOffPlayback(enabled)
+                                }
+                            },
+                            onDebugOverlayEnabledChange = { enabled: Boolean ->
+                                scope.launch {
+                                    app.appContainer.uiSettingsStore.setDebugOverlayEnabled(enabled)
+                                }
+                            },
+                            onLogoutClick = authViewModel::logout
+                        )
+                    }
                 }
             }
+
+            DebugMetricsOverlay(
+                enabled = uiSettings.debugOverlayEnabled,
+                cacheDir = app.appContainer.playerCacheDirectory()
+            )
         }
     }
 }
