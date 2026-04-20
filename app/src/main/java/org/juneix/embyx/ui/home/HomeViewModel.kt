@@ -30,6 +30,7 @@ class HomeViewModel(
 
     private companion object {
         const val LIBRARY_PAGE_SIZE = 30
+        const val SEARCH_PAGE_SIZE = 120
         const val ALL_LIBRARY_KEY = "ALL::ALL"
     }
 
@@ -131,9 +132,15 @@ class HomeViewModel(
 
                     var resolvedPage = 0
                     _uiState.update {
+                        val previousCurrentId = it.videos.getOrNull(it.currentPage)?.id
+                        val mappedPageById = previousCurrentId
+                            ?.let { currentId -> videos.indexOfFirst { item -> item.id == currentId } }
+                            ?.takeIf { mapped -> mapped >= 0 }
+
                         val safePage = when {
                             videos.isEmpty() -> 0
                             resetPage -> 0
+                            mappedPageById != null -> mappedPageById
                             else -> it.currentPage.coerceIn(0, videos.lastIndex)
                         }
                         resolvedPage = safePage
@@ -181,14 +188,29 @@ class HomeViewModel(
                         val selectionExists = selectedId != null && selectedType != null && libraries.any { library ->
                             library.id == selectedId && library.type == selectedType
                         }
+                        val searchSelectedId = it.searchSelectedLibraryId
+                        val searchSelectedType = it.searchSelectedLibraryType
+                        val searchSelectionExists =
+                            (searchSelectedId == null && searchSelectedType == null) ||
+                                (searchSelectedId != null && searchSelectedType != null && libraries.any { library ->
+                                    library.id == searchSelectedId && library.type == searchSelectedType
+                                })
+                        val resolvedSearchSelectedId = if (searchSelectionExists) searchSelectedId else null
+                        val resolvedSearchSelectedType = if (searchSelectionExists) searchSelectedType else null
                         if (selectionExists) {
-                            it.copy(libraries = libraries)
+                            it.copy(
+                                libraries = libraries,
+                                searchSelectedLibraryId = resolvedSearchSelectedId,
+                                searchSelectedLibraryType = resolvedSearchSelectedType
+                            )
                         } else {
                             shouldPersistSelection = selectedId != null || selectedType != null
                             it.copy(
                                 libraries = libraries,
                                 selectedLibraryId = null,
-                                selectedLibraryType = null
+                                selectedLibraryType = null,
+                                searchSelectedLibraryId = resolvedSearchSelectedId,
+                                searchSelectedLibraryType = resolvedSearchSelectedType
                             )
                         }
                     }
@@ -220,7 +242,10 @@ class HomeViewModel(
         _uiState.update {
             it.copy(
                 selectedLibraryId = selectedLibraryId,
-                selectedLibraryType = selectedLibraryType
+                selectedLibraryType = selectedLibraryType,
+                searchResults = emptyList(),
+                isSearchLoading = false,
+                searchErrorMessage = null
             )
         }
 
@@ -247,37 +272,47 @@ class HomeViewModel(
                 browsingVideos = emptyList(),
                 isBrowsingLoading = true,
                 browsingErrorMessage = null,
-                browsingHasMore = true,
-                browsingNextStartIndex = 0
+                browsingCurrentPage = 1,
+                browsingHasNextPage = false
             )
         }
-        requestLibraryPage(libraryId = library.id, startIndex = 0, append = false)
+        requestLibraryPage(libraryId = library.id, page = 1)
     }
 
     fun refreshLibraryBrowser() {
         val current = _uiState.value
         val libraryId = current.browsingLibraryId ?: return
+        val page = current.browsingCurrentPage.coerceAtLeast(1)
         _uiState.update {
             it.copy(
                 browsingVideos = emptyList(),
                 isBrowsingLoading = true,
                 browsingErrorMessage = null,
-                browsingHasMore = true,
-                browsingNextStartIndex = 0
+                browsingCurrentPage = page,
+                browsingHasNextPage = false
             )
         }
-        requestLibraryPage(libraryId = libraryId, startIndex = 0, append = false)
+        requestLibraryPage(libraryId = libraryId, page = page)
     }
 
-    fun loadMoreLibraryBrowser() {
+    fun goToLibraryBrowserPage(page: Int) {
         val state = _uiState.value
         val libraryId = state.browsingLibraryId ?: return
-        if (state.isBrowsingLoading || !state.browsingHasMore) return
-        requestLibraryPage(
-            libraryId = libraryId,
-            startIndex = state.browsingNextStartIndex,
-            append = true
-        )
+        if (state.isBrowsingLoading) return
+        val safePage = page.coerceAtLeast(1)
+        requestLibraryPage(libraryId = libraryId, page = safePage)
+    }
+
+    fun goToNextLibraryBrowserPage() {
+        val state = _uiState.value
+        if (!state.browsingHasNextPage) return
+        goToLibraryBrowserPage(state.browsingCurrentPage + 1)
+    }
+
+    fun goToPreviousLibraryBrowserPage() {
+        val state = _uiState.value
+        if (state.browsingCurrentPage <= 1) return
+        goToLibraryBrowserPage(state.browsingCurrentPage - 1)
     }
 
     fun closeLibraryBrowser() {
@@ -288,16 +323,106 @@ class HomeViewModel(
                 browsingVideos = emptyList(),
                 isBrowsingLoading = false,
                 browsingErrorMessage = null,
-                browsingHasMore = false,
-                browsingNextStartIndex = 0
+                browsingCurrentPage = 1,
+                browsingHasNextPage = false
             )
+        }
+    }
+
+    fun updateSearchQuery(query: String) {
+        _uiState.update { it.copy(searchQuery = query) }
+    }
+
+    fun selectSearchLibrary(library: MediaLibrary?) {
+        val selectedLibraryId = library?.takeIf { lib -> lib.type != MediaLibraryType.FAVORITES }?.id
+        val selectedLibraryType = library?.type
+        _uiState.update {
+            it.copy(
+                searchSelectedLibraryId = selectedLibraryId,
+                searchSelectedLibraryType = selectedLibraryType,
+                searchResults = emptyList(),
+                isSearchLoading = false,
+                searchErrorMessage = null
+            )
+        }
+    }
+
+    fun clearSearch() {
+        _uiState.update {
+            it.copy(
+                searchQuery = "",
+                searchResults = emptyList(),
+                isSearchLoading = false,
+                searchErrorMessage = null
+            )
+        }
+    }
+
+    fun searchVideos() {
+        val keyword = _uiState.value.searchQuery.trim()
+        if (keyword.isBlank()) {
+            _uiState.update {
+                it.copy(
+                    isSearchLoading = false,
+                    searchResults = emptyList(),
+                    searchErrorMessage = null
+                )
+            }
+            return
+        }
+
+        val selected = _uiState.value
+        val selectedLibraryId = selected.searchSelectedLibraryId
+        val favoritesOnly = selected.searchSelectedLibraryType == MediaLibraryType.FAVORITES
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isSearchLoading = true,
+                    searchResults = emptyList(),
+                    searchErrorMessage = null
+                )
+            }
+
+            getFeedUseCase(
+                parentId = selectedLibraryId,
+                random = false,
+                favoritesOnly = favoritesOnly,
+                startIndex = 0,
+                limit = SEARCH_PAGE_SIZE,
+                searchTerm = keyword
+            )
+                .onSuccess { videos ->
+                    _uiState.update { state ->
+                        if (state.searchQuery.trim() != keyword) {
+                            state
+                        } else {
+                            state.copy(
+                                searchResults = videos,
+                                isSearchLoading = false,
+                                searchErrorMessage = null
+                            )
+                        }
+                    }
+                }
+                .onFailure { throwable ->
+                    _uiState.update { state ->
+                        if (state.searchQuery.trim() != keyword) {
+                            state
+                        } else {
+                            state.copy(
+                                isSearchLoading = false,
+                                searchErrorMessage = throwable.message ?: "搜索失败"
+                            )
+                        }
+                    }
+                }
         }
     }
 
     private fun requestLibraryPage(
         libraryId: String,
-        startIndex: Int,
-        append: Boolean
+        page: Int
     ) {
         viewModelScope.launch {
             _uiState.update {
@@ -311,22 +436,17 @@ class HomeViewModel(
                 parentId = libraryId,
                 random = false,
                 favoritesOnly = false,
-                startIndex = startIndex,
+                startIndex = (page.coerceAtLeast(1) - 1) * LIBRARY_PAGE_SIZE,
                 limit = LIBRARY_PAGE_SIZE
             )
                 .onSuccess { videos ->
                     _uiState.update {
-                        val merged = if (append) {
-                            (it.browsingVideos + videos).distinctBy { item -> item.id }
-                        } else {
-                            videos
-                        }
                         it.copy(
-                            browsingVideos = merged,
+                            browsingVideos = videos,
                             isBrowsingLoading = false,
                             browsingErrorMessage = null,
-                            browsingHasMore = videos.size >= LIBRARY_PAGE_SIZE,
-                            browsingNextStartIndex = startIndex + videos.size
+                            browsingCurrentPage = page.coerceAtLeast(1),
+                            browsingHasNextPage = videos.size >= LIBRARY_PAGE_SIZE
                         )
                     }
                 }

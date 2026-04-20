@@ -11,7 +11,8 @@ interface VideoRepository {
         random: Boolean = false,
         favoritesOnly: Boolean = false,
         startIndex: Int = 0,
-        limit: Int = 99
+        limit: Int = 99,
+        searchTerm: String? = null
     ): Result<List<VideoItem>>
 
     suspend fun getLibraries(): Result<List<MediaLibrary>>

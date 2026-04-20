@@ -18,7 +18,10 @@ class AppContainer(context: Context) {
     private val appContext = context.applicationContext
     private val sessionStore = SessionStore(context.applicationContext)
     val uiSettingsStore = UiSettingsStore(context.applicationContext)
-    val homeCacheStore = HomeCacheStore(context.applicationContext)
+    val homeCacheStore = HomeCacheStore(
+        context = context.applicationContext,
+        sessionStore = sessionStore
+    )
     private val apiClientFactory = ApiClientFactory()
     private val playerRuntimeConfig = PlayerRuntimeConfig(appContext)
 
@@ -41,4 +44,8 @@ class AppContainer(context: Context) {
     fun newCachedMediaSourceFactory() = playerRuntimeConfig.newMediaSourceFactory()
 
     fun playerCacheDirectory() = playerRuntimeConfig.cacheDirectory()
+
+    fun updatePlayerCacheScope(server: String, userId: String) {
+        playerRuntimeConfig.setCacheScope(server = server, userId = userId)
+    }
 }

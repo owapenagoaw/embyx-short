@@ -36,8 +36,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.VolumeOff
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
+import androidx.compose.material.icons.outlined.AspectRatio
+import androidx.compose.material.icons.outlined.Autorenew
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Fullscreen
+import androidx.compose.material.icons.outlined.FullscreenExit
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Shuffle
@@ -106,6 +110,7 @@ import com.lalakiop.embyx.EmbyXApp
 import com.lalakiop.embyx.core.model.MediaLibraryType
 import com.lalakiop.embyx.core.model.PlaybackQualityPreset
 import com.lalakiop.embyx.core.model.PlaybackQualityPresets
+import com.lalakiop.embyx.data.local.PlaybackTouchBand
 import com.lalakiop.embyx.data.local.UiSettings
 import com.lalakiop.embyx.ui.debug.PlaybackDebugRegistry
 
@@ -166,6 +171,10 @@ fun PlayerFeedScreen(
     var activeSlot by remember { mutableIntStateOf(0) }
     var slot0Page by remember { mutableIntStateOf(-1) }
     var slot1Page by remember { mutableIntStateOf(-1) }
+    var autoPlayEnabled by rememberSaveable { mutableStateOf(uiSettings.autoPlayHomeEnabled) }
+    var preloadTargetPage by remember { mutableIntStateOf(-1) }
+    var endedSignal by remember { mutableIntStateOf(0) }
+    var endedSlot by remember { mutableIntStateOf(-1) }
 
     val player0 = remember {
         ExoPlayer.Builder(context)
@@ -214,12 +223,34 @@ fun PlayerFeedScreen(
             }
         }
 
+        val playbackStateListener0 = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED) {
+                    endedSlot = 0
+                    endedSignal++
+                }
+            }
+        }
+
+        val playbackStateListener1 = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED) {
+                    endedSlot = 1
+                    endedSignal++
+                }
+            }
+        }
+
         player0.addAnalyticsListener(listener0)
         player1.addAnalyticsListener(listener1)
+        player0.addListener(playbackStateListener0)
+        player1.addListener(playbackStateListener1)
 
         onDispose {
             player0.removeAnalyticsListener(listener0)
             player1.removeAnalyticsListener(listener1)
+            player0.removeListener(playbackStateListener0)
+            player1.removeListener(playbackStateListener1)
             PlaybackDebugRegistry.clearSource(source0)
             PlaybackDebugRegistry.clearSource(source1)
         }
@@ -321,6 +352,10 @@ fun PlayerFeedScreen(
         selectedQualityId = PlaybackQualityPresets.findById(uiSettings.preferredPlaybackPresetId).id
     }
 
+    LaunchedEffect(uiSettings.autoPlayHomeEnabled) {
+        autoPlayEnabled = uiSettings.autoPlayHomeEnabled
+    }
+
     LaunchedEffect(state.currentPage, state.videos.size) {
         if (state.videos.isEmpty()) {
             displayPageState = 0
@@ -349,6 +384,15 @@ fun PlayerFeedScreen(
         player1.playbackParameters = params
     }
 
+    LaunchedEffect(autoPlayEnabled) {
+        val repeatMode = if (autoPlayEnabled) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
+        player0.repeatMode = repeatMode
+        player1.repeatMode = repeatMode
+        if (!autoPlayEnabled) {
+            preloadTargetPage = -1
+        }
+    }
+
     LaunchedEffect(state.isPlaying, activeSlot) {
         val activePlayer = playerFor(activeSlot)
         val inactivePlayer = playerFor(1 - activeSlot)
@@ -362,7 +406,7 @@ fun PlayerFeedScreen(
         inactivePlayer.playWhenReady = false
     }
 
-    LaunchedEffect(state.videos, displayPageState, activeSlot) {
+    LaunchedEffect(state.videos, displayPageState, activeSlot, preloadTargetPage, autoPlayEnabled) {
         if (state.videos.isEmpty()) {
             clearSlot(0)
             clearSlot(1)
@@ -403,7 +447,73 @@ fun PlayerFeedScreen(
             }
         }
 
-        clearSlot(inactiveSlot)
+        val shouldKeepPreloaded = autoPlayEnabled && preloadTargetPage >= 0 && preloadTargetPage != safePage
+        if (shouldKeepPreloaded) {
+            if (pageFor(inactiveSlot) != preloadTargetPage) {
+                prepareSlot(inactiveSlot, preloadTargetPage, play = false)
+            }
+        } else {
+            clearSlot(inactiveSlot)
+        }
+    }
+
+    LaunchedEffect(
+        autoPlayEnabled,
+        state.isPlaying,
+        currentPositionMs,
+        durationMs,
+        displayPageState,
+        activeSlot,
+        state.videos.size
+    ) {
+        if (!autoPlayEnabled || !state.isPlaying || state.videos.isEmpty()) {
+            preloadTargetPage = -1
+            return@LaunchedEffect
+        }
+
+        val lastIndex = state.videos.lastIndex
+        val safePage = displayPageState.coerceIn(0, lastIndex)
+        val remainingMs = if (durationMs > 0L) durationMs - currentPositionMs else Long.MAX_VALUE
+        val targetPage = if (remainingMs in 0L..8_000L) {
+            nextPageByDirection(
+                currentPage = safePage,
+                direction = 1,
+                lastIndex = lastIndex
+            )
+        } else {
+            null
+        }
+
+        preloadTargetPage = targetPage ?: -1
+        if (targetPage != null) {
+            val inactiveSlot = 1 - activeSlot
+            if (pageFor(inactiveSlot) != targetPage) {
+                prepareSlot(inactiveSlot, targetPage, play = false)
+            }
+        }
+    }
+
+    LaunchedEffect(endedSignal, autoPlayEnabled, activeSlot, displayPageState, state.videos.size) {
+        if (!autoPlayEnabled || endedSignal == 0 || endedSlot != activeSlot || state.videos.isEmpty()) {
+            return@LaunchedEffect
+        }
+
+        val currentPage = displayPageState.coerceIn(0, state.videos.lastIndex)
+        val targetPage = nextPageByDirection(
+            currentPage = currentPage,
+            direction = 1,
+            lastIndex = state.videos.lastIndex
+        ) ?: return@LaunchedEffect
+
+        val previousActive = activeSlot
+        val nextActive = 1 - previousActive
+        prepareSlot(nextActive, targetPage, play = true)
+        activeSlot = nextActive
+        clearSlot(previousActive)
+        preloadTargetPage = -1
+        displayPageState = targetPage
+        awaitingViewModelPageSync = true
+        viewModel.onPageChanged(targetPage)
     }
 
     LaunchedEffect(allowScreenOffPlayback) {
@@ -463,9 +573,22 @@ fun PlayerFeedScreen(
         }
     }
 
-    LaunchedEffect(controlsAutoHideTick, isSeeking, controlsVisible, speedPanelVisible, qualityPanelVisible) {
-        if (controlsVisible && !isSeeking && !speedPanelVisible && !qualityPanelVisible) {
-            delay(1800)
+    LaunchedEffect(
+        controlsAutoHideTick,
+        isSeeking,
+        controlsVisible,
+        speedPanelVisible,
+        qualityPanelVisible,
+        uiSettings.playerAutoHideDelayMs,
+        uiSettings.playerAutoHideTopArea,
+        uiSettings.playerAutoHideRightArea,
+        uiSettings.playerAutoHideBottomArea
+    ) {
+        val hasAutoHideArea = uiSettings.playerAutoHideTopArea ||
+            uiSettings.playerAutoHideRightArea ||
+            uiSettings.playerAutoHideBottomArea
+        if (hasAutoHideArea && controlsVisible && !isSeeking && !speedPanelVisible && !qualityPanelVisible) {
+            delay(uiSettings.playerAutoHideDelayMs.toLong())
             if (!isSeeking && !speedPanelVisible && !qualityPanelVisible) {
                 controlsVisible = false
             }
@@ -476,6 +599,7 @@ fun PlayerFeedScreen(
         if (!controlsVisible) {
             speedPanelVisible = false
             qualityPanelVisible = false
+            sourcePickerExpanded = false
         }
     }
 
@@ -492,6 +616,9 @@ fun PlayerFeedScreen(
     val floatingPanelColor = if (isDarkTheme) Color.Black.copy(alpha = 0.58f) else Color.White.copy(alpha = 0.74f)
     val effectiveStatusTopPadding = if (isFullscreen) 0.dp else statusBarPadding
     val effectiveBottomInset = if (isFullscreen) 0.dp else bottomInset
+    val topAreaVisible = controlsVisible || !uiSettings.playerAutoHideTopArea
+    val rightAreaVisible = controlsVisible || !uiSettings.playerAutoHideRightArea
+    val bottomAreaVisible = controlsVisible || !uiSettings.playerAutoHideBottomArea
 
     val travelHeightPx = viewportHeightPx.toFloat().coerceAtLeast(1f)
     val settleOffsetY by animateFloatAsState(
@@ -762,6 +889,7 @@ fun PlayerFeedScreen(
                                 val pointerId = down.id
                                 val start = down.position
                                 val touchSlop = viewConfig.touchSlop
+                                val containerWidth = size.width.toFloat().coerceAtLeast(1f)
                                 val containerHeight = size.height.toFloat().coerceAtLeast(1f)
                                 var totalDx = 0f
                                 var totalDy = 0f
@@ -828,13 +956,55 @@ fun PlayerFeedScreen(
                                     val centerBottom = containerHeight * 0.7f
                                     val inCenterArea = down.position.y in centerTop..centerBottom
                                     val inBottomControlArea = down.position.y >= containerHeight * 0.72f
+                                    val inSummonZone = isPointInsideTouchBand(
+                                        x = down.position.x,
+                                        y = down.position.y,
+                                        width = containerWidth,
+                                        height = containerHeight,
+                                        band = uiSettings.playerSummonBand
+                                    )
+                                    val inPauseZone = isPointInsideTouchBand(
+                                        x = down.position.x,
+                                        y = down.position.y,
+                                        width = containerWidth,
+                                        height = containerHeight,
+                                        band = uiSettings.playerPauseBand
+                                    )
 
                                     isDraggingPreview = false
                                     pendingPageDelta = 0
                                     snapTargetOffsetY = 0f
 
                                     if (!moved) {
-                                        if (controlsVisible && !inBottomControlArea) {
+                                        val inOverlapZone = inSummonZone && inPauseZone
+                                        val inSummonOnlyZone = inSummonZone && !inPauseZone
+                                        val inPauseOnlyZone = inPauseZone && !inSummonZone
+
+                                        if (inSummonOnlyZone) {
+                                            if (controlsVisible) {
+                                                controlsVisible = false
+                                                speedPanelVisible = false
+                                                qualityPanelVisible = false
+                                                sourcePickerExpanded = false
+                                                isSeeking = false
+                                            } else {
+                                                controlsVisible = true
+                                                controlsAutoHideTick++
+                                            }
+                                        } else if (inPauseOnlyZone) {
+                                            controlsVisible = true
+                                            controlsAutoHideTick++
+                                            viewModel.togglePlayPause()
+                                        } else if (inOverlapZone) {
+                                            if (!controlsVisible) {
+                                                controlsVisible = true
+                                                controlsAutoHideTick++
+                                            } else {
+                                                controlsVisible = true
+                                                controlsAutoHideTick++
+                                                viewModel.togglePlayPause()
+                                            }
+                                        } else if (controlsVisible && !inBottomControlArea) {
                                             // Paused state takes priority: tap should resume playback first.
                                             if (!state.isPlaying) {
                                                 controlsVisible = true
@@ -861,97 +1031,101 @@ fun PlayerFeedScreen(
                         }
                 )
 
-                Box(
+                AnimatedVisibility(
+                    visible = topAreaVisible,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .zIndex(2f)
                         .padding(start = 16.dp, top = effectiveStatusTopPadding + 14.dp)
                 ) {
-                    Surface(
-                        modifier = Modifier.clickable {
-                            sourcePickerExpanded = !sourcePickerExpanded
-                            qualityPanelVisible = false
-                            speedPanelVisible = false
-                            controlsVisible = true
-                            controlsAutoHideTick++
-                        },
-                        shape = RoundedCornerShape(16.dp),
-                        color = floatingPanelColor
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Text(
-                                text = "首页播放",
-                                color = primaryForegroundColor,
-                                style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .size(4.dp)
-                                    .background(Color(0xFF2A87F6), CircleShape)
-                            )
-                            Text(
-                                text = sourceLabel,
-                                color = secondaryForegroundColor,
-                                style = MaterialTheme.typography.labelMedium
-                            )
-                            Text(
-                                text = if (sourcePickerExpanded) "收" else "选",
-                                color = primaryForegroundColor,
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-
-                    DropdownMenu(
-                        expanded = sourcePickerExpanded,
-                        onDismissRequest = { sourcePickerExpanded = false },
-                        modifier = Modifier.background(floatingPanelColor)
-                    ) {
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    text = if (state.selectedLibraryId == null) "✓ 全部视频" else "全部视频",
-                                    color = primaryForegroundColor
-                                )
+                    Box {
+                        Surface(
+                            modifier = Modifier.clickable {
+                                sourcePickerExpanded = !sourcePickerExpanded
+                                qualityPanelVisible = false
+                                speedPanelVisible = false
+                                controlsVisible = true
+                                controlsAutoHideTick++
                             },
-                            onClick = {
-                                viewModel.selectLibrary(null)
-                                sourcePickerExpanded = false
+                            shape = RoundedCornerShape(16.dp),
+                            color = floatingPanelColor
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(4.dp)
+                                        .background(Color(0xFF2A87F6), CircleShape)
+                                )
+                                Text(
+                                    text = sourceLabel,
+                                    color = secondaryForegroundColor,
+                                    style = MaterialTheme.typography.labelMedium
+                                )
+                                Text(
+                                    text = if (sourcePickerExpanded) "收" else "选",
+                                    color = primaryForegroundColor,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
-                        )
+                        }
 
-                        state.libraries.forEach { library ->
-                            val selected = state.selectedLibraryId == library.id && state.selectedLibraryType == library.type
+                        DropdownMenu(
+                            expanded = sourcePickerExpanded,
+                            onDismissRequest = { sourcePickerExpanded = false },
+                            modifier = Modifier.background(floatingPanelColor)
+                        ) {
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        text = (if (selected) "✓ " else "") + sourceOptionLabel(library),
+                                        text = if (state.selectedLibraryId == null) "✓ 全部视频" else "全部视频",
                                         color = primaryForegroundColor
                                     )
                                 },
                                 onClick = {
-                                    viewModel.selectLibrary(library)
+                                    viewModel.selectLibrary(null)
                                     sourcePickerExpanded = false
                                 }
                             )
+
+                            state.libraries.forEach { library ->
+                                val selected = state.selectedLibraryId == library.id && state.selectedLibraryType == library.type
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = (if (selected) "✓ " else "") + sourceOptionLabel(library),
+                                            color = primaryForegroundColor
+                                        )
+                                    },
+                                    onClick = {
+                                        viewModel.selectLibrary(library)
+                                        sourcePickerExpanded = false
+                                    }
+                                )
+                            }
                         }
                     }
                 }
 
-                Column(
+                AnimatedVisibility(
+                    visible = rightAreaVisible,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .zIndex(3f)
-                        .padding(end = 10.dp, bottom = effectiveBottomInset + 126.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                        .padding(end = 10.dp, bottom = effectiveBottomInset + 126.dp)
                 ) {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
                     IconButton(onClick = {
                         controlsVisible = true
                         controlsAutoHideTick++
@@ -1006,13 +1180,26 @@ fun PlayerFeedScreen(
                     IconButton(onClick = {
                         controlsVisible = true
                         controlsAutoHideTick++
+                        autoPlayEnabled = !autoPlayEnabled
+                        scope.launch {
+                            app.appContainer.uiSettingsStore.setAutoPlayHomeEnabled(autoPlayEnabled)
+                        }
+                    }) {
+                        Icon(
+                            imageVector = Icons.Outlined.Autorenew,
+                            contentDescription = "自动播放",
+                            tint = if (autoPlayEnabled) Color(0xFF2A87F6) else primaryForegroundColor
+                        )
+                    }
+                    IconButton(onClick = {
+                        controlsVisible = true
+                        controlsAutoHideTick++
                         fitHeightMode = !fitHeightMode
                     }) {
-                        Text(
-                            text = if (fitHeightMode) "高" else "宽",
-                            color = if (fitHeightMode) Color(0xFF2A87F6) else primaryForegroundColor,
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold
+                        Icon(
+                            imageVector = Icons.Outlined.AspectRatio,
+                            contentDescription = "画面适配",
+                            tint = if (fitHeightMode) Color(0xFF2A87F6) else primaryForegroundColor
                         )
                     }
                     IconButton(onClick = {
@@ -1020,18 +1207,18 @@ fun PlayerFeedScreen(
                         controlsAutoHideTick++
                         isFullscreen = !isFullscreen
                     }) {
-                        Text(
-                            text = if (isFullscreen) "退" else "全",
-                            color = primaryForegroundColor,
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold
+                        Icon(
+                            imageVector = if (isFullscreen) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen,
+                            contentDescription = if (isFullscreen) "退出全屏" else "进入全屏",
+                            tint = primaryForegroundColor
                         )
                     }
+                }
                 }
 
                 current?.let { item ->
                     AnimatedVisibility(
-                        visible = controlsVisible,
+                        visible = bottomAreaVisible,
                         enter = fadeIn(),
                         exit = fadeOut(),
                         modifier = Modifier
@@ -1436,6 +1623,21 @@ private fun fallbackPreloadPage(currentPage: Int, lastIndex: Int): Int? {
         currentPage > 0 -> currentPage - 1
         else -> null
     }
+}
+
+private fun isPointInsideTouchBand(
+    x: Float,
+    y: Float,
+    width: Float,
+    height: Float,
+    band: PlaybackTouchBand
+): Boolean {
+    if (width <= 0f || height <= 0f) return false
+    val normalized = band.normalized()
+    val bandHeight = (height * normalized.heightFraction).coerceIn(1f, height)
+    val top = (height - bandHeight).coerceAtLeast(0f) * normalized.topFraction
+    val bottom = top + bandHeight
+    return x in 0f..width && y in top..bottom
 }
 
 private fun currentSourceLabel(state: HomeUiState): String {

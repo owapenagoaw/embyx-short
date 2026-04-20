@@ -2,10 +2,11 @@ package com.lalakiop.embyx.ui.profile
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Switch
@@ -16,9 +17,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.lalakiop.embyx.core.model.MediaLibrary
@@ -41,13 +40,18 @@ fun ProfileScreen(
     onThemeModeChange: (ThemeMode) -> Unit,
     onScreenOffPlaybackChange: (Boolean) -> Unit,
     onDebugOverlayEnabledChange: (Boolean) -> Unit,
+    onOpenHistoryClick: () -> Unit,
+    onOpenAboutClick: () -> Unit,
+    onOpenPlayerControlsSettingsClick: () -> Unit,
+    contentPadding: PaddingValues = PaddingValues(0.dp),
     onLogoutClick: () -> Unit
 ) {
-    var historyTab by remember { mutableStateOf(HistoryTab.SEQUENTIAL) }
-
     LazyColumn(
         modifier = Modifier
-            .padding(20.dp),
+            .fillMaxSize()
+            .padding(contentPadding)
+            .padding(horizontal = 20.dp),
+        contentPadding = PaddingValues(top = 20.dp, bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
@@ -116,69 +120,47 @@ fun ProfileScreen(
         }
 
         item {
+            Button(
+                onClick = onOpenPlayerControlsSettingsClick,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("播放界面交互设置")
+            }
+        }
+
+        item {
             Text(text = "随机/顺序历史播放", style = MaterialTheme.typography.titleMedium)
         }
 
         item {
-            androidx.compose.foundation.layout.Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                FilterChip(
-                    selected = historyTab == HistoryTab.SEQUENTIAL,
-                    onClick = { historyTab = HistoryTab.SEQUENTIAL },
-                    label = { Text("顺序") }
-                )
-                FilterChip(
-                    selected = historyTab == HistoryTab.RANDOM,
-                    onClick = { historyTab = HistoryTab.RANDOM },
-                    label = { Text("随机") }
-                )
-            }
-        }
-
-        val selectedHistory = if (historyTab == HistoryTab.SEQUENTIAL) sequentialHistory else randomHistory
-        if (selectedHistory.isEmpty()) {
-            item {
-                Text(
-                    text = "暂无历史播放记录",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        } else {
-            items(selectedHistory.take(20), key = { it.video.id + "_" + it.playedAtMs }) { entry ->
-                HistoryItem(entry = entry)
+            Card(colors = CardDefaults.cardColors()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "顺序: ${sequentialHistory.size} 条  ·  随机: ${randomHistory.size} 条",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Button(
+                        onClick = onOpenHistoryClick,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("进入历史播放列表")
+                    }
+                }
             }
         }
 
         item {
-            Text(text = "播放列表", style = MaterialTheme.typography.titleMedium)
-        }
-
-        if (playlists.isEmpty()) {
-            item {
-                Text(
-                    text = "当前没有可用播放列表",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        } else {
-            items(playlists, key = { it.id }) { playlist ->
-                Card(colors = CardDefaults.cardColors()) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text(text = playlist.name, style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            text = "ID: ${playlist.id}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
+            Button(
+                onClick = onOpenAboutClick,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("关于")
             }
         }
 
@@ -191,11 +173,6 @@ fun ProfileScreen(
             }
         }
     }
-}
-
-private enum class HistoryTab {
-    RANDOM,
-    SEQUENTIAL
 }
 
 @Composable

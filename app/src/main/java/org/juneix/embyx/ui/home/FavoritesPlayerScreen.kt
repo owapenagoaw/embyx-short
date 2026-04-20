@@ -34,7 +34,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AspectRatio
+import androidx.compose.material.icons.outlined.Autorenew
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Fullscreen
+import androidx.compose.material.icons.outlined.FullscreenExit
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -96,6 +102,7 @@ import com.lalakiop.embyx.EmbyXApp
 import com.lalakiop.embyx.core.model.PlaybackQualityPreset
 import com.lalakiop.embyx.core.model.PlaybackQualityPresets
 import com.lalakiop.embyx.core.model.VideoItem
+import com.lalakiop.embyx.data.local.PlaybackTouchBand
 import com.lalakiop.embyx.data.local.UiSettings
 import com.lalakiop.embyx.ui.debug.PlaybackDebugRegistry
 
@@ -139,6 +146,9 @@ fun FavoritesPlayerScreen(
     var qualityErrorMessage by remember { mutableStateOf<String?>(null) }
     val streamUrlOverrides = remember { mutableStateMapOf<String, String>() }
     val mediaSourceIdOverrides = remember { mutableStateMapOf<String, String>() }
+    val favoriteOverrides = remember { mutableStateMapOf<String, Boolean>() }
+    var isFavoriteUpdating by remember { mutableStateOf(false) }
+    var favoriteErrorMessage by remember { mutableStateOf<String?>(null) }
 
     var viewportHeightPx by remember { mutableIntStateOf(1) }
     var dragOffsetY by remember { mutableFloatStateOf(0f) }
@@ -157,6 +167,10 @@ fun FavoritesPlayerScreen(
     var activeSlot by remember { mutableIntStateOf(0) }
     var slot0Page by remember { mutableIntStateOf(-1) }
     var slot1Page by remember { mutableIntStateOf(-1) }
+    var autoPlayEnabled by rememberSaveable { mutableStateOf(uiSettings.autoPlayFavoritesEnabled) }
+    var preloadTargetPage by remember { mutableIntStateOf(-1) }
+    var endedSignal by remember { mutableIntStateOf(0) }
+    var endedSlot by remember { mutableIntStateOf(-1) }
 
     val player0 = remember {
         ExoPlayer.Builder(context)
@@ -206,12 +220,34 @@ fun FavoritesPlayerScreen(
             }
         }
 
+        val playbackStateListener0 = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED) {
+                    endedSlot = 0
+                    endedSignal++
+                }
+            }
+        }
+
+        val playbackStateListener1 = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED) {
+                    endedSlot = 1
+                    endedSignal++
+                }
+            }
+        }
+
         player0.addAnalyticsListener(listener0)
         player1.addAnalyticsListener(listener1)
+        player0.addListener(playbackStateListener0)
+        player1.addListener(playbackStateListener1)
 
         onDispose {
             player0.removeAnalyticsListener(listener0)
             player1.removeAnalyticsListener(listener1)
+            player0.removeListener(playbackStateListener0)
+            player1.removeListener(playbackStateListener1)
             PlaybackDebugRegistry.clearSource(source0)
             PlaybackDebugRegistry.clearSource(source1)
         }
@@ -323,10 +359,27 @@ fun FavoritesPlayerScreen(
         selectedQualityId = PlaybackQualityPresets.findById(uiSettings.preferredPlaybackPresetId).id
     }
 
+    LaunchedEffect(displayPageState, videos) {
+        favoriteErrorMessage = null
+    }
+
+    LaunchedEffect(uiSettings.autoPlayFavoritesEnabled) {
+        autoPlayEnabled = uiSettings.autoPlayFavoritesEnabled
+    }
+
     LaunchedEffect(playbackSpeed) {
         val params = PlaybackParameters(playbackSpeed)
         player0.playbackParameters = params
         player1.playbackParameters = params
+    }
+
+    LaunchedEffect(autoPlayEnabled) {
+        val repeatMode = if (autoPlayEnabled) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
+        player0.repeatMode = repeatMode
+        player1.repeatMode = repeatMode
+        if (!autoPlayEnabled) {
+            preloadTargetPage = -1
+        }
     }
 
     LaunchedEffect(isPlaying, activeSlot) {
@@ -344,7 +397,7 @@ fun FavoritesPlayerScreen(
         inactivePlayer.playWhenReady = false
     }
 
-    LaunchedEffect(videos, displayPageState, activeSlot, isPlaying) {
+    LaunchedEffect(videos, displayPageState, activeSlot, isPlaying, preloadTargetPage, autoPlayEnabled) {
         if (videos.isEmpty()) {
             clearSlot(0)
             clearSlot(1)
@@ -367,7 +420,72 @@ fun FavoritesPlayerScreen(
 
         prepareSlot(activeSlot, safePage, play = isPlaying)
 
-        clearSlot(inactiveSlot)
+        val shouldKeepPreloaded = autoPlayEnabled && preloadTargetPage >= 0 && preloadTargetPage != safePage
+        if (shouldKeepPreloaded) {
+            if (pageFor(inactiveSlot) != preloadTargetPage) {
+                prepareSlot(inactiveSlot, preloadTargetPage, play = false)
+            }
+        } else {
+            clearSlot(inactiveSlot)
+        }
+    }
+
+    LaunchedEffect(
+        autoPlayEnabled,
+        isPlaying,
+        currentPositionMs,
+        durationMs,
+        displayPageState,
+        activeSlot,
+        videos.size
+    ) {
+        if (!autoPlayEnabled || !isPlaying || videos.isEmpty()) {
+            preloadTargetPage = -1
+            return@LaunchedEffect
+        }
+
+        val lastIndex = videos.lastIndex
+        val safePage = displayPageState.coerceIn(0, lastIndex)
+        val remainingMs = if (durationMs > 0L) durationMs - currentPositionMs else Long.MAX_VALUE
+        val targetPage = if (remainingMs in 0L..8_000L) {
+            nextPageByDirection(
+                currentPage = safePage,
+                direction = 1,
+                lastIndex = lastIndex
+            )
+        } else {
+            null
+        }
+
+        preloadTargetPage = targetPage ?: -1
+        if (targetPage != null) {
+            val inactiveSlot = 1 - activeSlot
+            if (pageFor(inactiveSlot) != targetPage) {
+                prepareSlot(inactiveSlot, targetPage, play = false)
+            }
+        }
+    }
+
+    LaunchedEffect(endedSignal, autoPlayEnabled, activeSlot, displayPageState, videos.size) {
+        if (!autoPlayEnabled || endedSignal == 0 || endedSlot != activeSlot || videos.isEmpty()) {
+            return@LaunchedEffect
+        }
+
+        val currentPage = displayPageState.coerceIn(0, videos.lastIndex)
+        val targetPage = nextPageByDirection(
+            currentPage = currentPage,
+            direction = 1,
+            lastIndex = videos.lastIndex
+        ) ?: return@LaunchedEffect
+
+        val previousActive = activeSlot
+        val nextActive = 1 - previousActive
+        prepareSlot(nextActive, targetPage, play = true)
+        activeSlot = nextActive
+        clearSlot(previousActive)
+        preloadTargetPage = -1
+        displayPageState = targetPage
+        isPlaying = true
     }
 
     LaunchedEffect(allowScreenOffPlayback) {
@@ -420,9 +538,22 @@ fun FavoritesPlayerScreen(
         }
     }
 
-    LaunchedEffect(controlsAutoHideTick, isSeeking, controlsVisible, speedPanelVisible, qualityPanelVisible) {
-        if (controlsVisible && !isSeeking && !speedPanelVisible && !qualityPanelVisible) {
-            delay(1800)
+    LaunchedEffect(
+        controlsAutoHideTick,
+        isSeeking,
+        controlsVisible,
+        speedPanelVisible,
+        qualityPanelVisible,
+        uiSettings.playerAutoHideDelayMs,
+        uiSettings.playerAutoHideTopArea,
+        uiSettings.playerAutoHideRightArea,
+        uiSettings.playerAutoHideBottomArea
+    ) {
+        val hasAutoHideArea = uiSettings.playerAutoHideTopArea ||
+            uiSettings.playerAutoHideRightArea ||
+            uiSettings.playerAutoHideBottomArea
+        if (hasAutoHideArea && controlsVisible && !isSeeking && !speedPanelVisible && !qualityPanelVisible) {
+            delay(uiSettings.playerAutoHideDelayMs.toLong())
             if (!isSeeking && !speedPanelVisible && !qualityPanelVisible) {
                 controlsVisible = false
             }
@@ -569,6 +700,12 @@ fun FavoritesPlayerScreen(
         }
         val effectiveStatusTopPadding = if (isFullscreen) 0.dp else statusBarPadding
         val effectiveBottomInset = if (isFullscreen) 0.dp else bottomInset
+        val topAreaVisible = controlsVisible || !uiSettings.playerAutoHideTopArea
+        val rightAreaVisible = controlsVisible || !uiSettings.playerAutoHideRightArea
+        val bottomAreaVisible = controlsVisible || !uiSettings.playerAutoHideBottomArea
+        val currentIsFavorite = current?.let { video ->
+            favoriteOverrides[video.id] ?: video.isFavorite
+        } ?: false
 
         LaunchedEffect(current?.id, selectedQualityId) {
             val item = current ?: run {
@@ -704,6 +841,7 @@ fun FavoritesPlayerScreen(
                         val pointerId = down.id
                         val start = down.position
                         val touchSlop = viewConfig.touchSlop
+                        val containerWidth = size.width.toFloat().coerceAtLeast(1f)
                         val containerHeight = size.height.toFloat().coerceAtLeast(1f)
                         var totalDx = 0f
                         var totalDy = 0f
@@ -771,13 +909,54 @@ fun FavoritesPlayerScreen(
                             val centerBottom = containerHeight * 0.7f
                             val inCenterArea = down.position.y in centerTop..centerBottom
                             val inBottomControlArea = down.position.y >= containerHeight * 0.72f
+                            val inSummonZone = isPointInsideTouchBand(
+                                x = down.position.x,
+                                y = down.position.y,
+                                width = containerWidth,
+                                height = containerHeight,
+                                band = uiSettings.playerSummonBand
+                            )
+                            val inPauseZone = isPointInsideTouchBand(
+                                x = down.position.x,
+                                y = down.position.y,
+                                width = containerWidth,
+                                height = containerHeight,
+                                band = uiSettings.playerPauseBand
+                            )
 
                             isDraggingPreview = false
                             pendingPageDelta = 0
                             snapTargetOffsetY = 0f
 
                             if (!moved) {
-                                if (controlsVisible && !inBottomControlArea) {
+                                val inOverlapZone = inSummonZone && inPauseZone
+                                val inSummonOnlyZone = inSummonZone && !inPauseZone
+                                val inPauseOnlyZone = inPauseZone && !inSummonZone
+
+                                if (inSummonOnlyZone) {
+                                    if (controlsVisible) {
+                                        controlsVisible = false
+                                        speedPanelVisible = false
+                                        qualityPanelVisible = false
+                                        isSeeking = false
+                                    } else {
+                                        controlsVisible = true
+                                        controlsAutoHideTick++
+                                    }
+                                } else if (inPauseOnlyZone) {
+                                    controlsVisible = true
+                                    controlsAutoHideTick++
+                                    isPlaying = !isPlaying
+                                } else if (inOverlapZone) {
+                                    if (!controlsVisible) {
+                                        controlsVisible = true
+                                        controlsAutoHideTick++
+                                    } else {
+                                        controlsVisible = true
+                                        controlsAutoHideTick++
+                                        isPlaying = !isPlaying
+                                    }
+                                } else if (controlsVisible && !inBottomControlArea) {
                                     if (!isPlaying) {
                                         controlsVisible = true
                                         controlsAutoHideTick++
@@ -802,34 +981,109 @@ fun FavoritesPlayerScreen(
                 }
         )
 
-        Surface(
+        AnimatedVisibility(
+            visible = topAreaVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .zIndex(2f)
-                .padding(start = 12.dp, top = effectiveStatusTopPadding + 10.dp),
-            shape = RoundedCornerShape(14.dp),
-            color = Color.Black.copy(alpha = 0.52f)
+                .padding(start = 12.dp, top = effectiveStatusTopPadding + 10.dp)
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = Color.Black.copy(alpha = 0.52f)
             ) {
-                IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
-                    Icon(
-                        imageVector = Icons.Outlined.Close,
-                        contentDescription = "关闭",
-                        tint = Color.White
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
+                        Icon(
+                            imageVector = Icons.Outlined.Close,
+                            contentDescription = "关闭",
+                            tint = Color.White
+                        )
+                    }
+                    Text(
+                        text = current?.title ?: "收藏播放",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.width(124.dp)
                     )
                 }
-                Text(
-                    text = current?.title ?: "收藏播放",
-                    color = Color.White,
-                    style = MaterialTheme.typography.labelLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.width(124.dp)
-                )
+            }
+        }
+
+        AnimatedVisibility(
+            visible = rightAreaVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .zIndex(4.2f)
+                .padding(end = 12.dp, bottom = effectiveBottomInset + 94.dp)
+        ) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalAlignment = Alignment.End
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .clickable {
+                            controlsVisible = true
+                            controlsAutoHideTick++
+                            autoPlayEnabled = !autoPlayEnabled
+                            scope.launch {
+                                app.appContainer.uiSettingsStore.setAutoPlayFavoritesEnabled(autoPlayEnabled)
+                            }
+                        },
+                    shape = RoundedCornerShape(9.dp),
+                    color = Color.Black.copy(alpha = 0.52f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Autorenew,
+                        contentDescription = "自动播放",
+                        tint = if (autoPlayEnabled) Color(0xFF2A87F6) else Color.White,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+                Surface(
+                    modifier = Modifier
+                        .clickable(enabled = current != null && !isFavoriteUpdating) {
+                            val target = current ?: return@clickable
+                            controlsVisible = true
+                            controlsAutoHideTick++
+
+                            val previous = favoriteOverrides[target.id] ?: target.isFavorite
+                            val next = !previous
+                            favoriteOverrides[target.id] = next
+                            favoriteErrorMessage = null
+                            isFavoriteUpdating = true
+
+                            scope.launch {
+                                app.appContainer.videoRepository
+                                    .setFavorite(itemId = target.id, favorite = next)
+                                    .onFailure { throwable ->
+                                        favoriteOverrides[target.id] = previous
+                                        favoriteErrorMessage = throwable.message ?: "收藏同步失败"
+                                    }
+                                isFavoriteUpdating = false
+                            }
+                        },
+                    shape = RoundedCornerShape(9.dp),
+                    color = Color.Black.copy(alpha = 0.52f)
+                ) {
+                    Icon(
+                        imageVector = if (currentIsFavorite) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
+                        contentDescription = "收藏",
+                        tint = if (currentIsFavorite) Color(0xFF2A87F6) else Color.White,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
                 Surface(
                     modifier = Modifier
                         .clickable {
@@ -838,13 +1092,12 @@ fun FavoritesPlayerScreen(
                             controlsAutoHideTick++
                         },
                     shape = RoundedCornerShape(9.dp),
-                    color = Color.White.copy(alpha = 0.16f)
+                    color = Color.Black.copy(alpha = 0.52f)
                 ) {
-                    Text(
-                        text = if (fitHeightMode) "高" else "宽",
-                        color = if (fitHeightMode) Color(0xFF2A87F6) else Color.White,
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold,
+                    Icon(
+                        imageVector = Icons.Outlined.AspectRatio,
+                        contentDescription = "画面适配",
+                        tint = if (fitHeightMode) Color(0xFF2A87F6) else Color.White,
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                     )
                 }
@@ -856,13 +1109,12 @@ fun FavoritesPlayerScreen(
                             isFullscreen = !isFullscreen
                         },
                     shape = RoundedCornerShape(9.dp),
-                    color = Color.White.copy(alpha = 0.16f)
+                    color = Color.Black.copy(alpha = 0.52f)
                 ) {
-                    Text(
-                        text = if (isFullscreen) "退" else "全",
-                        color = Color.White,
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold,
+                    Icon(
+                        imageVector = if (isFullscreen) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen,
+                        contentDescription = if (isFullscreen) "退出全屏" else "进入全屏",
+                        tint = Color.White,
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                     )
                 }
@@ -871,14 +1123,14 @@ fun FavoritesPlayerScreen(
 
         current?.let { item ->
             AnimatedVisibility(
-                visible = controlsVisible,
+                visible = bottomAreaVisible,
                 enter = fadeIn(),
                 exit = fadeOut(),
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .zIndex(4f)
                     .fillMaxWidth()
-                    .padding(start = 12.dp, end = 12.dp, bottom = effectiveBottomInset + 8.dp)
+                    .padding(start = 12.dp, end = 12.dp, bottom = effectiveBottomInset + 2.dp)
             ) {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.56f)),
@@ -1033,6 +1285,14 @@ fun FavoritesPlayerScreen(
                                 text = formatMillisToClock(durationMs),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = Color.White.copy(alpha = 0.78f)
+                            )
+                        }
+
+                        if (!favoriteErrorMessage.isNullOrBlank()) {
+                            Text(
+                                text = favoriteErrorMessage.orEmpty(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFE67E7E)
                             )
                         }
 
@@ -1268,6 +1528,21 @@ private fun nextPageByDirection(currentPage: Int, direction: Int, lastIndex: Int
     if (direction == 0) return null
     val target = currentPage + direction
     return if (target in 0..lastIndex) target else null
+}
+
+private fun isPointInsideTouchBand(
+    x: Float,
+    y: Float,
+    width: Float,
+    height: Float,
+    band: PlaybackTouchBand
+): Boolean {
+    if (width <= 0f || height <= 0f) return false
+    val normalized = band.normalized()
+    val bandHeight = (height * normalized.heightFraction).coerceIn(1f, height)
+    val top = (height - bandHeight).coerceAtLeast(0f) * normalized.topFraction
+    val bottom = top + bandHeight
+    return x in 0f..width && y in top..bottom
 }
 
 private fun formatMillisToClock(ms: Long): String {

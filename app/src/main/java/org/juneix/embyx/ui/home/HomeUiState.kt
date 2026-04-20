@@ -22,6 +22,12 @@ data class HomeUiState(
     val browsingVideos: List<VideoItem> = emptyList(),
     val isBrowsingLoading: Boolean = false,
     val browsingErrorMessage: String? = null,
-    val browsingHasMore: Boolean = false,
-    val browsingNextStartIndex: Int = 0
+    val browsingCurrentPage: Int = 1,
+    val browsingHasNextPage: Boolean = false,
+    val searchSelectedLibraryId: String? = null,
+    val searchSelectedLibraryType: MediaLibraryType? = null,
+    val searchQuery: String = "",
+    val searchResults: List<VideoItem> = emptyList(),
+    val isSearchLoading: Boolean = false,
+    val searchErrorMessage: String? = null
 )

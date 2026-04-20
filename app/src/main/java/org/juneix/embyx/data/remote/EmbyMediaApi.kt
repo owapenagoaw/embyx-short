@@ -25,6 +25,7 @@ interface EmbyMediaApi {
         @Query("Filters") filters: String? = null,
         @Query("SortBy") sortBy: String? = "DateCreated",
         @Query("SortOrder") sortOrder: String? = "Descending",
+        @Query("SearchTerm") searchTerm: String? = null,
         @Query("EnableTotalRecordCount") enableTotalRecordCount: Boolean = true,
         @Query("RandomSeed") randomSeed: Int? = null
     ): Response<ItemsResponse>

@@ -14,6 +14,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,8 +44,19 @@ import com.lalakiop.embyx.ui.home.FavoritesViewModel
 import com.lalakiop.embyx.ui.home.HomeViewModel
 import com.lalakiop.embyx.ui.home.LibraryScreen
 import com.lalakiop.embyx.ui.home.PlayerFeedScreen
+import com.lalakiop.embyx.ui.home.SearchScreen
+import com.lalakiop.embyx.ui.profile.AboutScreen
+import com.lalakiop.embyx.ui.profile.PlayerControlsSettingsScreen
+import com.lalakiop.embyx.ui.profile.PlayerControlsConfigDraft
+import com.lalakiop.embyx.ui.profile.PlaybackHistoryScreen
 import com.lalakiop.embyx.ui.profile.ProfileScreen
 import kotlinx.coroutines.launch
+
+private object ProfileRoutes {
+    const val history = "profile/history"
+    const val about = "profile/about"
+    const val playerControls = "profile/player-controls"
+}
 
 @Composable
 fun EmbyXRoot() {
@@ -78,6 +90,25 @@ fun EmbyXRoot() {
             return@EmbyXTheme
         }
 
+        var playerCacheScopeReady by remember(authState.session.server, authState.session.userId) {
+            mutableStateOf(false)
+        }
+
+        LaunchedEffect(authState.session.server, authState.session.userId) {
+            app.appContainer.updatePlayerCacheScope(
+                server = authState.session.server,
+                userId = authState.session.userId
+            )
+            playerCacheScopeReady = true
+        }
+
+        if (!playerCacheScopeReady) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("正在初始化播放器...")
+            }
+            return@EmbyXTheme
+        }
+
         val homeViewModel: HomeViewModel = viewModel(
             factory = HomeViewModel.Factory(
                 getFeedUseCase = app.appContainer.getFeedUseCase,
@@ -107,13 +138,12 @@ fun EmbyXRoot() {
 
         val navController = rememberNavController()
         var homeFullscreen by remember { mutableStateOf(false) }
-        var overlayPlayerFullscreen by remember { mutableStateOf(false) }
 
         Box(modifier = Modifier.fillMaxSize()) {
             Scaffold(
                 modifier = Modifier.fillMaxSize(),
                 bottomBar = {
-                    if (!homeFullscreen && !overlayPlayerFullscreen) {
+                    if (!homeFullscreen) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -171,23 +201,24 @@ fun EmbyXRoot() {
                             }
                         )
                     }
+                    composable(BottomTabs.Search.route) {
+                        SearchScreen(
+                            viewModel = homeViewModel,
+                            contentPadding = innerPadding,
+                            allowScreenOffPlayback = uiSettings.allowScreenOffPlayback
+                        )
+                    }
                     composable(BottomTabs.Library.route) {
                         LibraryScreen(
                             viewModel = homeViewModel,
-                            contentPadding = innerPadding,
-                            onPlayerFullscreenChange = { fullscreen ->
-                                overlayPlayerFullscreen = fullscreen
-                            }
+                            contentPadding = innerPadding
                         )
                     }
                     composable(BottomTabs.Favorites.route) {
                         FavoritesScreen(
                             viewModel = favoritesViewModel,
                             contentPadding = innerPadding,
-                            allowScreenOffPlayback = uiSettings.allowScreenOffPlayback,
-                            onPlayerFullscreenChange = { fullscreen ->
-                                overlayPlayerFullscreen = fullscreen
-                            }
+                            allowScreenOffPlayback = uiSettings.allowScreenOffPlayback
                         )
                     }
                     composable(BottomTabs.Profile.route) {
@@ -216,7 +247,51 @@ fun EmbyXRoot() {
                                     app.appContainer.uiSettingsStore.setDebugOverlayEnabled(enabled)
                                 }
                             },
+                            onOpenHistoryClick = {
+                                navController.navigate(ProfileRoutes.history)
+                            },
+                            onOpenAboutClick = {
+                                navController.navigate(ProfileRoutes.about)
+                            },
+                            onOpenPlayerControlsSettingsClick = {
+                                navController.navigate(ProfileRoutes.playerControls)
+                            },
+                            contentPadding = innerPadding,
                             onLogoutClick = authViewModel::logout
+                        )
+                    }
+                    composable(ProfileRoutes.history) {
+                        PlaybackHistoryScreen(
+                            randomHistory = randomHistory,
+                            sequentialHistory = sequentialHistory,
+                            contentPadding = innerPadding,
+                            onBack = { navController.popBackStack() }
+                        )
+                    }
+                    composable(ProfileRoutes.about) {
+                        AboutScreen(
+                            contentPadding = innerPadding,
+                            onBack = { navController.popBackStack() }
+                        )
+                    }
+                    composable(ProfileRoutes.playerControls) {
+                        PlayerControlsSettingsScreen(
+                            settings = uiSettings,
+                            contentPadding = innerPadding,
+                            onBack = { navController.popBackStack() },
+                            onSave = { draft: PlayerControlsConfigDraft ->
+                                scope.launch {
+                                    app.appContainer.uiSettingsStore.setPlayerControlAreaAutoHide(
+                                        topArea = draft.autoHideTop,
+                                        rightArea = draft.autoHideRight,
+                                        bottomArea = draft.autoHideBottom
+                                    )
+                                    app.appContainer.uiSettingsStore.setPlayerAutoHideDelayMs(draft.autoHideDelayMs)
+                                    app.appContainer.uiSettingsStore.setPlayerSummonBand(draft.summonBand)
+                                    app.appContainer.uiSettingsStore.setPlayerPauseBand(draft.pauseBand)
+                                    navController.popBackStack()
+                                }
+                            }
                         )
                     }
                 }

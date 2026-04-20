@@ -7,14 +7,17 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.Icons
@@ -29,16 +32,22 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.lalakiop.embyx.core.model.MediaLibrary
@@ -49,11 +58,11 @@ import kotlin.math.max
 @Composable
 fun LibraryScreen(
     viewModel: HomeViewModel,
-    contentPadding: PaddingValues,
-    onPlayerFullscreenChange: (Boolean) -> Unit = {}
+    contentPadding: PaddingValues
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var playingIndex by remember { mutableIntStateOf(-1) }
+    var jumpPageInput by remember(state.browsingLibraryId) { mutableStateOf("1") }
 
     val playlists = state.libraries.filter { it.type == MediaLibraryType.PLAYLIST }
     val libraries = state.libraries.filter { it.type == MediaLibraryType.LIBRARY }
@@ -61,6 +70,16 @@ fun LibraryScreen(
 
     if (!isBrowsingLibrary && playingIndex >= 0) {
         playingIndex = -1
+    }
+
+    LaunchedEffect(state.browsingCurrentPage, state.browsingLibraryId) {
+        jumpPageInput = state.browsingCurrentPage.toString()
+    }
+
+    LaunchedEffect(state.browsingCurrentPage) {
+        if (playingIndex >= 0) {
+            playingIndex = -1
+        }
     }
 
     BackHandler(enabled = isBrowsingLibrary && playingIndex < 0) {
@@ -73,94 +92,96 @@ fun LibraryScreen(
             .background(MaterialTheme.colorScheme.background)
     ) {
         if (isBrowsingLibrary) {
-            LazyColumn(
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(contentPadding),
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                    .padding(contentPadding)
             ) {
-                item {
-                    Box(modifier = Modifier.fillMaxWidth()) {
-                        IconButton(
-                            onClick = viewModel::closeLibraryBrowser,
-                            modifier = Modifier.align(Alignment.CenterStart)
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Outlined.ArrowBack,
-                                contentDescription = "返回媒体库列表",
-                                tint = MaterialTheme.colorScheme.onBackground
-                            )
-                        }
-                        Text(
-                            text = state.browsingLibraryName ?: "媒体库内容",
-                            style = MaterialTheme.typography.titleLarge,
-                            color = MaterialTheme.colorScheme.onBackground,
-                            modifier = Modifier
-                                .align(Alignment.CenterStart)
-                                .padding(start = 48.dp, end = 48.dp)
-                        )
-                        IconButton(
-                            onClick = viewModel::refreshLibraryBrowser,
-                            modifier = Modifier.align(Alignment.CenterEnd)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Outlined.Refresh,
-                                contentDescription = "刷新库内容",
-                                tint = MaterialTheme.colorScheme.onBackground
-                            )
-                        }
-                    }
-                }
-
-                when {
-                    state.browsingVideos.isEmpty() && state.isBrowsingLoading -> {
-                        item {
-                            Box(
-                                modifier = Modifier.fillMaxWidth(),
-                                contentAlignment = Alignment.Center
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 52.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    item {
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            IconButton(
+                                onClick = viewModel::closeLibraryBrowser,
+                                modifier = Modifier.align(Alignment.CenterStart)
                             ) {
-                                CircularProgressIndicator()
-                            }
-                        }
-                    }
-
-                    state.browsingVideos.isEmpty() && state.browsingErrorMessage != null -> {
-                        item {
-                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Text(
-                                    text = state.browsingErrorMessage ?: "加载失败",
-                                    color = MaterialTheme.colorScheme.error
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Outlined.ArrowBack,
+                                    contentDescription = "返回媒体库列表",
+                                    tint = MaterialTheme.colorScheme.onBackground
                                 )
-                                Button(onClick = viewModel::refreshLibraryBrowser) {
-                                    Text("重试")
-                                }
+                            }
+                            Text(
+                                text = state.browsingLibraryName ?: "媒体库内容",
+                                style = MaterialTheme.typography.titleLarge,
+                                color = MaterialTheme.colorScheme.onBackground,
+                                modifier = Modifier
+                                    .align(Alignment.CenterStart)
+                                    .padding(start = 48.dp, end = 48.dp)
+                            )
+                            IconButton(
+                                onClick = viewModel::refreshLibraryBrowser,
+                                modifier = Modifier.align(Alignment.CenterEnd)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Refresh,
+                                    contentDescription = "刷新库内容",
+                                    tint = MaterialTheme.colorScheme.onBackground
+                                )
                             }
                         }
                     }
 
-                    state.browsingVideos.isEmpty() -> {
-                        item {
-                            Text(
-                                text = "该库暂无可播放媒体",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    else -> {
-                        itemsIndexed(state.browsingVideos, key = { _, it -> it.id }) { index, video ->
-                            LibraryMediaTile(
-                                video = video,
-                                onClick = {
-                                    playingIndex = index
+                    when {
+                        state.browsingVideos.isEmpty() && state.isBrowsingLoading -> {
+                            item {
+                                Box(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator()
                                 }
-                            )
+                            }
                         }
 
-                        item {
-                            when {
-                                state.isBrowsingLoading -> {
+                        state.browsingVideos.isEmpty() && state.browsingErrorMessage != null -> {
+                            item {
+                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Text(
+                                        text = state.browsingErrorMessage ?: "加载失败",
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                    Button(onClick = viewModel::refreshLibraryBrowser) {
+                                        Text("重试")
+                                    }
+                                }
+                            }
+                        }
+
+                        state.browsingVideos.isEmpty() -> {
+                            item {
+                                Text(
+                                    text = "该库暂无可播放媒体",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        else -> {
+                            itemsIndexed(state.browsingVideos, key = { _, it -> it.id }) { index, video ->
+                                LibraryMediaTile(
+                                    video = video,
+                                    onClick = {
+                                        playingIndex = index
+                                    }
+                                )
+                            }
+
+                            item {
+                                if (state.isBrowsingLoading) {
                                     Box(
                                         modifier = Modifier.fillMaxWidth(),
                                         contentAlignment = Alignment.Center
@@ -168,27 +189,30 @@ fun LibraryScreen(
                                         CircularProgressIndicator()
                                     }
                                 }
-
-                                state.browsingHasMore -> {
-                                    Button(
-                                        onClick = viewModel::loadMoreLibraryBrowser,
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Text("加载更多")
-                                    }
-                                }
-
-                                else -> {
-                                    Text(
-                                        text = "已加载全部媒体",
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        style = MaterialTheme.typography.labelMedium
-                                    )
-                                }
                             }
                         }
                     }
                 }
+
+                LibraryPagingBar(
+                    currentPage = state.browsingCurrentPage,
+                    hasNextPage = state.browsingHasNextPage,
+                    isLoading = state.isBrowsingLoading,
+                    jumpPageInput = jumpPageInput,
+                    onJumpInputChange = { input ->
+                        jumpPageInput = input.filter { it.isDigit() }.take(6)
+                    },
+                    onPreviousPage = viewModel::goToPreviousLibraryBrowserPage,
+                    onNextPage = viewModel::goToNextLibraryBrowserPage,
+                    onJumpPage = {
+                        jumpPageInput.toIntOrNull()?.let { page ->
+                            viewModel.goToLibraryBrowserPage(page)
+                        }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                )
             }
         } else {
             LazyColumn(
@@ -268,10 +292,81 @@ fun LibraryScreen(
             FavoritesPlayerScreen(
                 videos = state.browsingVideos,
                 initialIndex = playingIndex.coerceIn(0, state.browsingVideos.lastIndex),
-                contentPadding = contentPadding,
-                onFullscreenChange = onPlayerFullscreenChange,
+                contentPadding = PaddingValues(0.dp),
                 onClose = { playingIndex = -1 }
             )
+        }
+    }
+}
+
+@Composable
+private fun LibraryPagingBar(
+    currentPage: Int,
+    hasNextPage: Boolean,
+    isLoading: Boolean,
+    jumpPageInput: String,
+    onJumpInputChange: (String) -> Unit,
+    onPreviousPage: () -> Unit,
+    onNextPage: () -> Unit,
+    onJumpPage: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RectangleShape,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f)
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            TextButton(
+                onClick = onPreviousPage,
+                enabled = !isLoading && currentPage > 1,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("上一页", style = MaterialTheme.typography.labelSmall)
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = jumpPageInput,
+                    onValueChange = onJumpInputChange,
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodySmall,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier
+                        .width(64.dp)
+                        .height(44.dp)
+                )
+                Text(
+                    text = "/$currentPage",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+                TextButton(
+                    onClick = onJumpPage,
+                    enabled = !isLoading && jumpPageInput.isNotBlank()
+                ) {
+                    Text("确认", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
+            TextButton(
+                onClick = onNextPage,
+                enabled = !isLoading && hasNextPage,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("下一页", style = MaterialTheme.typography.labelSmall)
+            }
         }
     }
 }

@@ -33,6 +33,7 @@ class EmbyVideoRepository(
     )
 
     private data class LibraryWeightsCache(
+        val scopeKey: String,
         val weightsByLibraryId: Map<String, Int>,
         val updatedAtMs: Long
     )
@@ -48,7 +49,8 @@ class EmbyVideoRepository(
         random: Boolean,
         favoritesOnly: Boolean,
         startIndex: Int,
-        limit: Int
+        limit: Int,
+        searchTerm: String?
     ): Result<List<VideoItem>> {
         return runCatching {
             val session = sessionStore.sessionFlow.first()
@@ -64,7 +66,8 @@ class EmbyVideoRepository(
             val effectiveParentId = if (random && parentId == null && !favoritesOnly) {
                 pickWeightedRandomLibraryId(
                     api = api,
-                    userId = session.userId
+                    userId = session.userId,
+                    scopeKey = sessionScopeKey(session.server, session.userId)
                 )
             } else {
                 parentId
@@ -78,6 +81,7 @@ class EmbyVideoRepository(
                 filters = if (favoritesOnly) "IsFavorite" else null,
                 sortBy = if (random) "Random" else "DateCreated",
                 sortOrder = if (random) null else "Descending",
+                searchTerm = searchTerm?.trim()?.takeIf { it.isNotBlank() },
                 enableTotalRecordCount = true,
                 randomSeed = if (random) Random.nextInt() else null
             )
@@ -261,7 +265,8 @@ class EmbyVideoRepository(
 
     private suspend fun pickWeightedRandomLibraryId(
         api: com.lalakiop.embyx.data.remote.EmbyMediaApi,
-        userId: String
+        userId: String,
+        scopeKey: String
     ): String? {
         val libraries = fetchPlayableLibraries(api = api, userId = userId)
         if (libraries.isEmpty()) {
@@ -271,6 +276,7 @@ class EmbyVideoRepository(
         val weightsByLibraryId = resolveLibraryWeights(
             api = api,
             userId = userId,
+            scopeKey = scopeKey,
             libraries = libraries
         )
 
@@ -306,12 +312,14 @@ class EmbyVideoRepository(
     private suspend fun resolveLibraryWeights(
         api: com.lalakiop.embyx.data.remote.EmbyMediaApi,
         userId: String,
+        scopeKey: String,
         libraries: List<MediaLibrary>
     ): Map<String, Int> {
         val now = System.currentTimeMillis()
         val cached = libraryWeightsCache
+        val sameScope = cached?.scopeKey == scopeKey
         val hasAllLibraries = cached?.weightsByLibraryId?.keys?.containsAll(libraries.map { it.id }) == true
-        val cacheValid = cached != null && hasAllLibraries && now - cached.updatedAtMs <= LIBRARY_WEIGHTS_CACHE_TTL_MS
+        val cacheValid = cached != null && sameScope && hasAllLibraries && now - cached.updatedAtMs <= LIBRARY_WEIGHTS_CACHE_TTL_MS
         if (cacheValid) {
             return cached!!.weightsByLibraryId
         }
@@ -332,6 +340,7 @@ class EmbyVideoRepository(
         }
 
         libraryWeightsCache = LibraryWeightsCache(
+            scopeKey = scopeKey,
             weightsByLibraryId = refreshed,
             updatedAtMs = now
         )
@@ -466,5 +475,9 @@ class EmbyVideoRepository(
         } else {
             "$absolute?api_key=$token"
         }
+    }
+
+    private fun sessionScopeKey(server: String, userId: String): String {
+        return "${server.trim().trimEnd('/').lowercase()}|${userId.trim().lowercase()}"
     }
 }
