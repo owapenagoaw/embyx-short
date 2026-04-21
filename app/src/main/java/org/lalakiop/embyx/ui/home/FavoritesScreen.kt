@@ -51,7 +51,8 @@ private const val FAVORITES_PAGE_SIZE = 20
 fun FavoritesScreen(
     viewModel: FavoritesViewModel,
     contentPadding: PaddingValues,
-    allowScreenOffPlayback: Boolean = false
+    allowScreenOffPlayback: Boolean = false,
+    onPlayerFullscreenChange: (Boolean) -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var playingIndex by remember { mutableIntStateOf(-1) }
@@ -224,13 +225,20 @@ fun FavoritesScreen(
         }
 
         if (playingIndex >= 0 && state.videos.isNotEmpty()) {
-            FavoritesPlayerScreen(
-                videos = state.videos,
-                initialIndex = playingIndex.coerceIn(0, state.videos.lastIndex),
-                contentPadding = PaddingValues(0.dp),
-                allowScreenOffPlayback = allowScreenOffPlayback,
-                onClose = { playingIndex = -1 }
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(contentPadding)
+            ) {
+                FavoritesPlayerScreen(
+                    videos = state.videos,
+                    initialIndex = playingIndex.coerceIn(0, state.videos.lastIndex),
+                    contentPadding = PaddingValues(0.dp),
+                    allowScreenOffPlayback = allowScreenOffPlayback,
+                    onFullscreenChange = onPlayerFullscreenChange,
+                    onClose = { playingIndex = -1 }
+                )
+            }
         }
     }
 }

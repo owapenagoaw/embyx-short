@@ -138,12 +138,13 @@ fun EmbyXRoot() {
 
         val navController = rememberNavController()
         var homeFullscreen by remember { mutableStateOf(false) }
+        var overlayPlayerFullscreen by remember { mutableStateOf(false) }
 
         Box(modifier = Modifier.fillMaxSize()) {
             Scaffold(
                 modifier = Modifier.fillMaxSize(),
                 bottomBar = {
-                    if (!homeFullscreen) {
+                    if (!homeFullscreen && !overlayPlayerFullscreen) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -205,20 +206,29 @@ fun EmbyXRoot() {
                         SearchScreen(
                             viewModel = homeViewModel,
                             contentPadding = innerPadding,
-                            allowScreenOffPlayback = uiSettings.allowScreenOffPlayback
+                            allowScreenOffPlayback = uiSettings.allowScreenOffPlayback,
+                            onPlayerFullscreenChange = { fullscreen ->
+                                overlayPlayerFullscreen = fullscreen
+                            }
                         )
                     }
                     composable(BottomTabs.Library.route) {
                         LibraryScreen(
                             viewModel = homeViewModel,
-                            contentPadding = innerPadding
+                            contentPadding = innerPadding,
+                            onPlayerFullscreenChange = { fullscreen ->
+                                overlayPlayerFullscreen = fullscreen
+                            }
                         )
                     }
                     composable(BottomTabs.Favorites.route) {
                         FavoritesScreen(
                             viewModel = favoritesViewModel,
                             contentPadding = innerPadding,
-                            allowScreenOffPlayback = uiSettings.allowScreenOffPlayback
+                            allowScreenOffPlayback = uiSettings.allowScreenOffPlayback,
+                            onPlayerFullscreenChange = { fullscreen ->
+                                overlayPlayerFullscreen = fullscreen
+                            }
                         )
                     }
                     composable(BottomTabs.Profile.route) {
@@ -265,6 +275,9 @@ fun EmbyXRoot() {
                             randomHistory = randomHistory,
                             sequentialHistory = sequentialHistory,
                             contentPadding = innerPadding,
+                            onPlayerFullscreenChange = { fullscreen ->
+                                overlayPlayerFullscreen = fullscreen
+                            },
                             onBack = { navController.popBackStack() }
                         )
                     }

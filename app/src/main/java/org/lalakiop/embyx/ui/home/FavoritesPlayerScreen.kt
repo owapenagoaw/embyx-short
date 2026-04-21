@@ -841,11 +841,15 @@ fun FavoritesPlayerScreen(
                         val pointerId = down.id
                         val start = down.position
                         val touchSlop = viewConfig.touchSlop
+                        val verticalStartSlop = touchSlop * 0.75f
                         val containerWidth = size.width.toFloat().coerceAtLeast(1f)
                         val containerHeight = size.height.toFloat().coerceAtLeast(1f)
                         var totalDx = 0f
                         var totalDy = 0f
                         var dragStarted = false
+                        var lastMoveTime = down.uptimeMillis
+                        var recentSampleTime = down.uptimeMillis
+                        var recentSampleOffsetY = 0f
 
                         while (true) {
                             val event = awaitPointerEvent(PointerEventPass.Main)
@@ -857,17 +861,16 @@ fun FavoritesPlayerScreen(
                             val delta: Offset = change.position - change.previousPosition
                             totalDx += delta.x
                             totalDy += delta.y
+                            lastMoveTime = change.uptimeMillis
 
                             if (!dragStarted) {
                                 val absDx = abs(totalDx)
                                 val absDy = abs(totalDy)
-                                if (absDx > touchSlop || absDy > touchSlop) {
-                                    if (absDy >= absDx) {
-                                        dragStarted = true
-                                        isDraggingPreview = true
-                                        speedPanelVisible = false
-                                        qualityPanelVisible = false
-                                    }
+                                if (absDy > verticalStartSlop && absDy >= absDx * 0.85f) {
+                                    dragStarted = true
+                                    isDraggingPreview = true
+                                    speedPanelVisible = false
+                                    qualityPanelVisible = false
                                 }
                             }
 
@@ -875,18 +878,26 @@ fun FavoritesPlayerScreen(
                                 val offset = (change.position.y - start.y)
                                     .coerceIn(-containerHeight, containerHeight)
                                 dragOffsetY = offset
+                                if (change.uptimeMillis - recentSampleTime >= 120L) {
+                                    recentSampleTime = change.uptimeMillis
+                                    recentSampleOffsetY = offset
+                                }
 
                                 change.consume()
                             }
                         }
 
                         if (dragStarted) {
-                            val threshold = containerHeight * 0.15f
+                            val distanceThreshold = containerHeight * 0.12f
+                            val velocityThreshold = containerHeight * 1.05f
+                            val velocityWindowMs = (lastMoveTime - recentSampleTime).coerceAtLeast(1L)
+                            val velocityWindowSec = velocityWindowMs / 1000f
+                            val releaseVelocityY = (dragOffsetY - recentSampleOffsetY) / velocityWindowSec
                             val canGoNext = displayPage < videos.lastIndex
                             val canGoPrev = displayPage > 0
                             val delta = when {
-                                dragOffsetY <= -threshold && canGoNext -> 1
-                                dragOffsetY >= threshold && canGoPrev -> -1
+                                (dragOffsetY <= -distanceThreshold || releaseVelocityY <= -velocityThreshold) && canGoNext -> 1
+                                (dragOffsetY >= distanceThreshold || releaseVelocityY >= velocityThreshold) && canGoPrev -> -1
                                 else -> 0
                             }
 

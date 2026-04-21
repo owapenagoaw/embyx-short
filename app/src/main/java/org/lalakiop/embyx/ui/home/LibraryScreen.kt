@@ -58,7 +58,8 @@ import kotlin.math.max
 @Composable
 fun LibraryScreen(
     viewModel: HomeViewModel,
-    contentPadding: PaddingValues
+    contentPadding: PaddingValues,
+    onPlayerFullscreenChange: (Boolean) -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var playingIndex by remember { mutableIntStateOf(-1) }
@@ -289,12 +290,19 @@ fun LibraryScreen(
         }
 
         if (isBrowsingLibrary && playingIndex >= 0 && state.browsingVideos.isNotEmpty()) {
-            FavoritesPlayerScreen(
-                videos = state.browsingVideos,
-                initialIndex = playingIndex.coerceIn(0, state.browsingVideos.lastIndex),
-                contentPadding = PaddingValues(0.dp),
-                onClose = { playingIndex = -1 }
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(contentPadding)
+            ) {
+                FavoritesPlayerScreen(
+                    videos = state.browsingVideos,
+                    initialIndex = playingIndex.coerceIn(0, state.browsingVideos.lastIndex),
+                    contentPadding = PaddingValues(0.dp),
+                    onFullscreenChange = onPlayerFullscreenChange,
+                    onClose = { playingIndex = -1 }
+                )
+            }
         }
     }
 }

@@ -47,7 +47,8 @@ import com.lalakiop.embyx.core.model.MediaLibraryType
 fun SearchScreen(
     viewModel: HomeViewModel,
     contentPadding: PaddingValues,
-    allowScreenOffPlayback: Boolean = false
+    allowScreenOffPlayback: Boolean = false,
+    onPlayerFullscreenChange: (Boolean) -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var playingIndex by remember { mutableIntStateOf(-1) }
@@ -292,6 +293,7 @@ fun SearchScreen(
                 initialIndex = playingIndex.coerceIn(0, state.searchResults.lastIndex),
                 contentPadding = PaddingValues(0.dp),
                 allowScreenOffPlayback = allowScreenOffPlayback,
+                onFullscreenChange = onPlayerFullscreenChange,
                 onClose = { playingIndex = -1 }
             )
         }

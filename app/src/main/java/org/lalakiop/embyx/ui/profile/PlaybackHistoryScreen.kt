@@ -51,6 +51,7 @@ fun PlaybackHistoryScreen(
     randomHistory: List<PlaybackHistoryEntry>,
     sequentialHistory: List<PlaybackHistoryEntry>,
     contentPadding: PaddingValues,
+    onPlayerFullscreenChange: (Boolean) -> Unit = {},
     onBack: () -> Unit
 ) {
     var historyTab by remember { mutableStateOf(HistoryTab.SEQUENTIAL) }
@@ -234,6 +235,7 @@ fun PlaybackHistoryScreen(
                 videos = playbackVideos,
                 initialIndex = playingIndex.coerceIn(0, playbackVideos.lastIndex),
                 contentPadding = PaddingValues(0.dp),
+                onFullscreenChange = onPlayerFullscreenChange,
                 onClose = { playingIndex = -1 }
             )
         }
