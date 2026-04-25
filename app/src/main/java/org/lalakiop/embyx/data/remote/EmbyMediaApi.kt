@@ -46,7 +46,8 @@ interface EmbyMediaApi {
         @Query("SubtitleStreamIndex") subtitleStreamIndex: Int = -1,
         @Query("MediaSourceId") mediaSourceId: String? = null,
         @Query("reqformat") reqFormat: String = "json",
-        @Query("MaxStreamingBitrate") maxStreamingBitrate: Int,
+        // ⚠️ 关键修复：移除MaxStreamingBitrate查询参数，只使用Body中的DeviceProfile
+        @Query("CurrentPlaySessionId") currentPlaySessionId: String? = null,  // ⚠️ 切换清晰度时传入旧会话ID
         @Body body: PlaybackInfoRequest
     ): Response<PlaybackInfoResponse>
 

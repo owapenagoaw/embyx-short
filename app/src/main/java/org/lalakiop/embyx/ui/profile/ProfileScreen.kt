@@ -28,13 +28,14 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+@Suppress("UNUSED_PARAMETER")
 @Composable
 fun ProfileScreen(
     session: Session,
     themeMode: ThemeMode,
     allowScreenOffPlayback: Boolean,
     debugOverlayEnabled: Boolean,
-    playlists: List<MediaLibrary>,
+    playlists: List<MediaLibrary>,  // 未使用，保留以便将来扩展
     randomHistory: List<PlaybackHistoryEntry>,
     sequentialHistory: List<PlaybackHistoryEntry>,
     onThemeModeChange: (ThemeMode) -> Unit,

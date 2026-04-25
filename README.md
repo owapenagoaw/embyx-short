@@ -11,7 +11,7 @@ EmbyX Short 是基于 Kotlin + Jetpack Compose + Media3 的安卓原生 Emby 客
 - 应用包名：com.lalakiop.embyx
 - 最低系统版本：Android 7.0+（minSdk 24）
 - 编译目标：targetSdk 35
-- 当前版本：0.1.3
+- 当前版本：0.1.6
 
 ## 2. 技术栈
 
@@ -25,21 +25,65 @@ EmbyX Short 是基于 Kotlin + Jetpack Compose + Media3 的安卓原生 Emby 客
 
 ## 3. 目录结构（android-native）
 
-```text
-android-native/
-├── app/
-│   ├── src/main/java/org/juneix/embyx/
-│   │   ├── data/             # 数据层（API、本地存储、Repository）
-│   │   ├── domain/           # UseCase 与领域接口
-│   │   ├── ui/               # Compose 页面与根导航
-│   │   ├── player/           # 播放运行时配置
-│   │   └── AppContainer.kt   # 依赖注入容器
-│   ├── release/
-│   │   └── app-release.apk   # release 构建产物
-│   └── build.gradle.kts
-├── gradlew / gradlew.bat
-└── README.md
-```
+. 技术架构
+采用 Clean Architecture（整洁架构） 设计模式，分为三层：
+数据层 (Data Layer)
+远程数据源 (remote/)
+EmbyAuthApi.kt - 认证API接口
+EmbyMediaApi.kt - 媒体API接口（视频、库、收藏等）
+ApiClientFactory.kt - API客户端工厂
+model/ - 网络响应模型
+本地数据源 (local/)
+SessionStore.kt - 会话存储（登录状态）
+UiSettingsStore.kt - UI设置存储（主题、开关等）
+HomeCacheStore.kt - 首页缓存（视频列表、播放历史等）
+仓库层 (repository/)
+AuthRepositoryImpl.kt - 认证仓库实现
+EmbyVideoRepository.kt - 视频仓库实现
+VideoRepository.kt - 视频仓库接口
+领域层 (Domain Layer)
+仓库接口 (domain/repository/)
+AuthRepository.kt - 认证仓库接口
+用例 (domain/usecase/)
+LoginUseCase.kt - 登录用例
+GetFeedUseCase.kt - 获取视频流用例
+GetLibrariesUseCase.kt - 获取媒体库用例
+SetFavoriteUseCase.kt - 设置收藏用例
+表现层 (UI Layer)
+核心组件
+MainActivity.kt - 主Activity入口
+EmbyXApp.kt - Application类
+AppContainer.kt - 依赖注入容器
+UI模块 (ui/)
+EmbyXRoot.kt - 根导航组件
+BottomTabs.kt - 底部导航定义
+EmbyXTheme.kt - 主题配置
+auth/ - 认证模块
+LoginScreen.kt - 登录界面
+AuthViewModel.kt - 认证ViewModel
+home/ - 首页模块
+PlayerFeedScreen.kt - 主播放器界面（85.6KB，核心功能）
+HomeViewModel.kt - 首页ViewModel（730行）
+FavoritesScreen.kt - 收藏列表
+FavoritesPlayerScreen.kt - 收藏播放器（70.7KB）
+LibraryScreen.kt - 媒体库浏览
+SearchScreen.kt - 搜索界面
+profile/ - 个人中心模块
+ProfileScreen.kt - 个人主页
+PlaybackHistoryScreen.kt - 播放历史
+PlayerControlsSettingsScreen.kt - 播放器控制设置
+AboutScreen.kt - 关于页面
+debug/ - 调试模块
+DebugMetricsOverlay.kt - 性能监控浮窗
+PlaybackDebugRegistry.kt - 播放调试注册表
+播放器模块 (player/)
+PlayerRuntimeConfig.kt - 播放器运行时配置
+核心模型 (core/model/)
+Session.kt - 会话模型
+VideoItem.kt - 视频项模型
+MediaLibrary.kt - 媒体库模型
+PlaybackQualityPreset.kt - 清晰度预设
+ResolvedPlaybackStream.kt - 解析后的播放流
 
 ## 4. 主要功能
 
@@ -248,8 +292,23 @@ Windows：
 3. 顺序播放恢复异常？
 检查是否在随机模式下；随机模式与顺序模式是分开的状态体系。
 
+4. 播放时频繁显示“加载中”提示？
+已优化加载指示器逻辑，**仅在视频因网络原因暂停超过2秒时才显示**：
+- 短暂的网络波动不会触发加载提示
+- 后台预加载完全不会干扰观看体验
+- 清晰度切换也采用同样的2秒延迟策略
+- 每500ms检查一次缓冲状态，确保及时更新网速显示
+
+5. 播放进度是否同步到服务器？
+✅ v0.1.6 已完整实现播放状态报告功能：
+- 播放开始/停止自动报告
+- 每10秒上报播放进度
+- 支持多设备进度同步
+- 服务端“继续观看”更准确
+
+
+
 ## 11. 致谢
 
 本项目在功能与架构思路上参考并引用了以下优秀项目，特别感谢：
-
 - https://github.com/juneix/embyx

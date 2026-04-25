@@ -44,6 +44,7 @@ import androidx.compose.material.icons.outlined.FullscreenExit
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -102,12 +103,12 @@ import com.lalakiop.embyx.EmbyXApp
 import com.lalakiop.embyx.core.model.PlaybackQualityPreset
 import com.lalakiop.embyx.core.model.PlaybackQualityPresets
 import com.lalakiop.embyx.core.model.VideoItem
+import com.lalakiop.embyx.core.playback.PlaybackReporter
 import com.lalakiop.embyx.data.local.PlaybackTouchBand
 import com.lalakiop.embyx.data.local.UiSettings
 import com.lalakiop.embyx.ui.debug.PlaybackDebugRegistry
 
 @Composable
-@OptIn(UnstableApi::class)
 fun FavoritesPlayerScreen(
     videos: List<VideoItem>,
     initialIndex: Int,
@@ -127,6 +128,29 @@ fun FavoritesPlayerScreen(
     val activity = context.findActivity()
     val statusBarPadding = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val bottomInset = contentPadding.calculateBottomPadding()
+    
+    // 播放状态报告器（可为null，未登录时为null）
+    val sessionStore = app.appContainer.authRepository.sessionFlow
+    val session by sessionStore.collectAsStateWithLifecycle(initialValue = null)
+    val playbackReporter = remember(session) {
+        session?.let { sess ->
+            if (sess.server.isNotBlank() && sess.token.isNotBlank()) {
+                PlaybackReporter(
+                    playbackApi = app.appContainer.createPlaybackApi(
+                        server = sess.server,
+                        token = sess.token
+                    ),
+                    token = sess.token,
+                    userId = sess.userId
+                )
+            } else {
+                null
+            }
+        }
+    }
+    
+    // 追踪当前正在报告的视频ID，避免重复报告
+    var currentReportingItemId by remember { mutableStateOf<String?>(null) }
 
     var currentPositionMs by remember { mutableLongStateOf(0L) }
     var durationMs by remember { mutableLongStateOf(0L) }
@@ -171,6 +195,14 @@ fun FavoritesPlayerScreen(
     var preloadTargetPage by remember { mutableIntStateOf(-1) }
     var endedSignal by remember { mutableIntStateOf(0) }
     var endedSlot by remember { mutableIntStateOf(-1) }
+    var slot0IsLoading by remember { mutableStateOf(false) }
+    var slot1IsLoading by remember { mutableStateOf(false) }
+    var slot0BitrateEstimate by remember { mutableLongStateOf(0L) }
+    var slot1BitrateEstimate by remember { mutableLongStateOf(0L) }
+    
+    // 优化：追踪缓冲开始时间，仅在长时间缓冲时显示加载指示器
+    var bufferingStartTime by remember { mutableLongStateOf(0L) }
+    var showLoadingOverlay by remember { mutableStateOf(false) }
 
     val player0 = remember {
         ExoPlayer.Builder(context)
@@ -207,6 +239,17 @@ fun FavoritesPlayerScreen(
             ) {
                 PlaybackDebugRegistry.updateDecoder(source0, decoderName)
             }
+
+            override fun onBandwidthEstimate(
+                eventTime: AnalyticsListener.EventTime,
+                totalLoadTimeMs: Int,
+                totalBytesLoaded: Long,
+                bitrateEstimate: Long
+            ) {
+                if (bitrateEstimate > 0L) {
+                    slot0BitrateEstimate = bitrateEstimate
+                }
+            }
         }
 
         val listener1 = object : AnalyticsListener {
@@ -218,22 +261,181 @@ fun FavoritesPlayerScreen(
             ) {
                 PlaybackDebugRegistry.updateDecoder(source1, decoderName)
             }
+
+            override fun onBandwidthEstimate(
+                eventTime: AnalyticsListener.EventTime,
+                totalLoadTimeMs: Int,
+                totalBytesLoaded: Long,
+                bitrateEstimate: Long
+            ) {
+                if (bitrateEstimate > 0L) {
+                    slot1BitrateEstimate = bitrateEstimate
+                }
+            }
         }
 
         val playbackStateListener0 = object : Player.Listener {
+            override fun onIsLoadingChanged(isLoading: Boolean) {
+                slot0IsLoading = isLoading
+                // 优化：追踪活跃槽位的缓冲开始时间
+                if (isLoading && activeSlot == 0) {
+                    bufferingStartTime = System.currentTimeMillis()
+                } else if (!isLoading && activeSlot == 0) {
+                    bufferingStartTime = 0L
+                    showLoadingOverlay = false
+                }
+            }
+            
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int
+            ) {
+                // 检测用户拖动进度条
+                // ⚠️ 关键修复：只有活跃槽位且当前报告的视频ID匹配时才上报
+                if (reason == Player.DISCONTINUITY_REASON_SEEK && 
+                    activeSlot == 0 && 
+                    playbackReporter != null &&
+                    currentReportingItemId == videos.getOrNull(slot0Page)?.id) {
+                    val seekPosition = newPosition.positionMs
+                    // 立即上报seek后的位置（使用TimeUpdate事件）
+                    playbackReporter.onUserAction(
+                        eventName = com.lalakiop.embyx.data.remote.model.ProgressEvent.TIME_UPDATE,
+                        positionMs = seekPosition,
+                        isPaused = !player0.playWhenReady
+                    )
+                    // 更新位置
+                    playbackReporter.updatePosition(seekPosition)
+                }
+            }
+
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_ENDED) {
                     endedSlot = 0
                     endedSignal++
                 }
+                if (playbackState == Player.STATE_BUFFERING) {
+                    slot0IsLoading = true
+                    // 优化：记录缓冲开始时间
+                    if (activeSlot == 0 && bufferingStartTime == 0L) {
+                        bufferingStartTime = System.currentTimeMillis()
+                    }
+                } else if (playbackState == Player.STATE_READY || playbackState == Player.STATE_IDLE) {
+                    slot0IsLoading = false
+                    // 优化：缓冲结束，清除状态
+                    if (activeSlot == 0) {
+                        bufferingStartTime = 0L
+                        showLoadingOverlay = false
+                    }
+                }
+                
+                // 报告播放状态变化
+                // ⚠️ 关键修复：只有活跃槽位且当前报告的视频ID匹配时才上报
+                if (activeSlot == 0 && 
+                    playbackReporter != null &&
+                    currentReportingItemId == videos.getOrNull(slot0Page)?.id) {
+                    // 更新当前位置（在主线程安全调用）
+                    playbackReporter.updatePosition(player0.currentPosition)
+                    
+                    val eventName = when (playbackState) {
+                        Player.STATE_BUFFERING -> com.lalakiop.embyx.data.remote.model.ProgressEvent.TIME_UPDATE
+                        Player.STATE_READY -> if (player0.playWhenReady) {
+                            com.lalakiop.embyx.data.remote.model.ProgressEvent.UNPAUSE
+                        } else {
+                            com.lalakiop.embyx.data.remote.model.ProgressEvent.PAUSE
+                        }
+                        else -> null
+                    }
+                    if (eventName != null) {
+                        playbackReporter.onUserAction(
+                            eventName = eventName,
+                            positionMs = player0.currentPosition,
+                            isPaused = !player0.playWhenReady
+                        )
+                    }
+                }
             }
         }
 
         val playbackStateListener1 = object : Player.Listener {
+            override fun onIsLoadingChanged(isLoading: Boolean) {
+                slot1IsLoading = isLoading
+                // 优化：追踪活跃槽位的缓冲开始时间
+                if (isLoading && activeSlot == 1) {
+                    bufferingStartTime = System.currentTimeMillis()
+                } else if (!isLoading && activeSlot == 1) {
+                    bufferingStartTime = 0L
+                    showLoadingOverlay = false
+                }
+            }
+            
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int
+            ) {
+                // 检测用户拖动进度条
+                // ⚠️ 关键修复：只有活跃槽位且当前报告的视频ID匹配时才上报
+                if (reason == Player.DISCONTINUITY_REASON_SEEK && 
+                    activeSlot == 1 && 
+                    playbackReporter != null &&
+                    currentReportingItemId == videos.getOrNull(slot1Page)?.id) {
+                    val seekPosition = newPosition.positionMs
+                    // 立即上报seek后的位置（使用TimeUpdate事件）
+                    playbackReporter.onUserAction(
+                        eventName = com.lalakiop.embyx.data.remote.model.ProgressEvent.TIME_UPDATE,
+                        positionMs = seekPosition,
+                        isPaused = !player1.playWhenReady
+                    )
+                    // 更新位置
+                    playbackReporter.updatePosition(seekPosition)
+                }
+            }
+
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_ENDED) {
                     endedSlot = 1
                     endedSignal++
+                }
+                if (playbackState == Player.STATE_BUFFERING) {
+                    slot1IsLoading = true
+                    // 优化：记录缓冲开始时间
+                    if (activeSlot == 1 && bufferingStartTime == 0L) {
+                        bufferingStartTime = System.currentTimeMillis()
+                    }
+                } else if (playbackState == Player.STATE_READY || playbackState == Player.STATE_IDLE) {
+                    slot1IsLoading = false
+                    // 优化：缓冲结束，清除状态
+                    if (activeSlot == 1) {
+                        bufferingStartTime = 0L
+                        showLoadingOverlay = false
+                    }
+                }
+                
+                // 报告播放状态变化
+                // ⚠️ 关键修复：只有活跃槽位且当前报告的视频ID匹配时才上报
+                if (activeSlot == 1 && 
+                    playbackReporter != null &&
+                    currentReportingItemId == videos.getOrNull(slot1Page)?.id) {
+                    // 更新当前位置（在主线程安全调用）
+                    playbackReporter.updatePosition(player1.currentPosition)
+                    
+                    val eventName = when (playbackState) {
+                        Player.STATE_BUFFERING -> com.lalakiop.embyx.data.remote.model.ProgressEvent.TIME_UPDATE
+                        Player.STATE_READY -> if (player1.playWhenReady) {
+                            com.lalakiop.embyx.data.remote.model.ProgressEvent.UNPAUSE
+                        } else {
+                            com.lalakiop.embyx.data.remote.model.ProgressEvent.PAUSE
+                        }
+                        else -> null
+                    }
+                    if (eventName != null) {
+                        playbackReporter.onUserAction(
+                            eventName = eventName,
+                            positionMs = player1.currentPosition,
+                            isPaused = !player1.playWhenReady
+                        )
+                    }
                 }
             }
         }
@@ -250,6 +452,21 @@ fun FavoritesPlayerScreen(
             player1.removeListener(playbackStateListener1)
             PlaybackDebugRegistry.clearSource(source0)
             PlaybackDebugRegistry.clearSource(source1)
+            
+            // 清理时报告播放停止
+            val currentPage = if (activeSlot == 0) slot0Page else slot1Page
+            val currentItem = videos.getOrNull(currentPage)
+            val currentPlayer = if (activeSlot == 0) player0 else player1
+            
+            if (currentItem != null && playbackReporter != null) {
+                playbackReporter.onStop(
+                    positionMs = currentPlayer.currentPosition,
+                    nextMediaType = if (videos.size > currentPage + 1) "Video" else null
+                )
+            }
+            
+            playbackReporter?.cleanup()
+            currentReportingItemId = null  // 重置追踪状态
         }
     }
 
@@ -397,6 +614,27 @@ fun FavoritesPlayerScreen(
         inactivePlayer.playWhenReady = false
     }
 
+    // 优化：定期检查活跃槽位的缓冲时间，超过2秒才显示加载指示器
+    LaunchedEffect(bufferingStartTime, activeSlot, isQualityLoading) {
+        if (bufferingStartTime > 0L || isQualityLoading) {
+            val checkInterval = 500L // 每500ms检查一次
+            while (isActive && (bufferingStartTime > 0L || isQualityLoading)) {
+                val elapsed = if (isQualityLoading) {
+                    // 清晰度切换也使用同样的逻辑
+                    System.currentTimeMillis() - bufferingStartTime.coerceAtLeast(0L)
+                } else {
+                    System.currentTimeMillis() - bufferingStartTime
+                }
+                if (elapsed >= 2000L) { // 超过2秒才显示
+                    showLoadingOverlay = true
+                }
+                delay(checkInterval)
+            }
+        } else {
+            showLoadingOverlay = false
+        }
+    }
+
     LaunchedEffect(videos, displayPageState, activeSlot, isPlaying, preloadTargetPage, autoPlayEnabled) {
         if (videos.isEmpty()) {
             clearSlot(0)
@@ -492,6 +730,126 @@ fun FavoritesPlayerScreen(
         val wakeMode = if (allowScreenOffPlayback) C.WAKE_MODE_NETWORK else C.WAKE_MODE_NONE
         player0.setWakeMode(wakeMode)
         player1.setWakeMode(wakeMode)
+    }
+
+    LaunchedEffect(activeSlot, slot0Page, slot1Page, videos.size) {
+        // 当活跃槽位或页面变化时，报告播放开始
+        val currentPage = pageFor(activeSlot)
+        val currentItem = videos.getOrNull(currentPage)
+        
+        if (currentItem != null && currentPage >= 0 && playbackReporter != null) {
+            // 只有当视频ID变化时才报告（避免预加载触发）
+            if (currentReportingItemId != currentItem.id) {
+                // 如果之前有正在报告的视频，先报告停止
+                currentReportingItemId?.let { _ ->
+                    val previousPlayer = playerFor(activeSlot)
+                    playbackReporter.onStop(
+                        positionMs = previousPlayer.currentPosition,
+                        nextMediaType = "Video"  // 切换到下一个视频
+                    )
+                }
+                
+                // ⚠️ 关键修复：首次播放时调用/PlaybackInfo获取服务器生成的PlaySessionId
+                val existingMediaSourceId = mediaSourceIdOverrides[currentItem.id]
+                var serverPlaySessionId: String?
+                
+                if (existingMediaSourceId == null) {
+                    // 首次播放：调用resolvePlaybackStream获取PlaySessionId
+                    try {
+                        val resolved = app.appContainer.videoRepository.resolvePlaybackStream(
+                            itemId = currentItem.id,
+                            preset = com.lalakiop.embyx.core.model.PlaybackQualityPresets.ORIGINAL,
+                            mediaSourceId = null,
+                            startTimeTicks = 0L
+                        ).getOrNull()
+                        
+                        if (resolved != null) {
+                            // 保存解析结果
+                            streamUrlOverrides[currentItem.id] = resolved.streamUrl
+                            resolved.mediaSourceId?.let { sid -> mediaSourceIdOverrides[currentItem.id] = sid }
+                            serverPlaySessionId = resolved.playSessionId
+                            android.util.Log.d("FavoritesPlayer", "Got PlaySessionId from server: $serverPlaySessionId")
+                        } else {
+                            serverPlaySessionId = null
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("FavoritesPlayer", "Failed to resolve playback stream", e)
+                        serverPlaySessionId = null
+                    }
+                } else {
+                    // 已经切换过清晰度，使用缓存的mediaSourceId
+                    serverPlaySessionId = null
+                }
+                
+                // 报告新视频开始
+                playbackReporter.onStart(
+                    itemId = currentItem.id,
+                    mediaSourceId = mediaSourceIdOverrides[currentItem.id],
+                    positionMs = 0L,
+                    playMethod = com.lalakiop.embyx.data.remote.model.PlayMethod.DIRECT_PLAY,
+                    playSessionId = serverPlaySessionId  // 传入服务器生成的ID（如果有）
+                )
+                currentReportingItemId = currentItem.id
+            }
+        }
+    }
+    
+    // 定期更新播放位置（每秒更新一次）
+    LaunchedEffect(playbackReporter, activeSlot) {
+        if (playbackReporter == null) return@LaunchedEffect
+        
+        while (true) {
+            kotlinx.coroutines.delay(1000L)  // 每秒更新
+            val currentPlayer = playerFor(activeSlot)
+            playbackReporter.updatePosition(currentPlayer.currentPosition)
+        }
+    }
+    
+    // 监听应用生命周期，进入后台或切换页面时报告停止
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> {
+                    // 应用进入后台，报告当前视频停止
+                    if (currentReportingItemId != null && playbackReporter != null) {
+                        val currentPlayer = playerFor(activeSlot)
+                        playbackReporter.onStop(
+                            positionMs = currentPlayer.currentPosition,
+                            nextMediaType = null  // 进入后台，不知道下一个是什么
+                        )
+                    }
+                }
+                Lifecycle.Event.ON_START -> {
+                    // 应用返回前台，恢复定时报告和心跳（不创建新会话）
+                    if (currentReportingItemId != null && playbackReporter != null) {
+                        playbackReporter.resumeReporting()
+                    }
+                }
+                Lifecycle.Event.ON_PAUSE -> {
+                    // 页面不可见（切换到其他页面），报告停止
+                    if (currentReportingItemId != null && playbackReporter != null) {
+                        val currentPlayer = playerFor(activeSlot)
+                        playbackReporter.onStop(
+                            positionMs = currentPlayer.currentPosition,
+                            nextMediaType = null
+                        )
+                        // 不清空 currentReportingItemId，避免返回时误判为视频切换
+                    }
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    // 页面重新可见，恢复定时报告和心跳（不创建新会话）
+                    if (currentReportingItemId != null && playbackReporter != null) {
+                        playbackReporter.resumeReporting()
+                    }
+                }
+                else -> {}
+            }
+        }
+        
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     DisposableEffect(activity, allowScreenOffPlayback, isPlaying, videos.isNotEmpty()) {
@@ -716,15 +1074,24 @@ fun FavoritesPlayerScreen(
 
             isQualityLoading = true
             qualityErrorMessage = null
+            
+            // ⚠️ 关键修复：获取当前PlaySessionId，用于切换清晰度时传入
+            val oldPlaySessionId = playbackReporter?.getCurrentPlaySessionId() ?: ""
 
             app.appContainer.videoRepository
                 .resolvePlaybackStream(
                     itemId = item.id,
                     preset = selectedQualityPreset,
                     mediaSourceId = mediaSourceIdOverrides[item.id],
-                    startTimeTicks = playerFor(activeSlot).currentPosition.coerceAtLeast(0L) * 10_000L
+                    startTimeTicks = playerFor(activeSlot).currentPosition.coerceAtLeast(0L) * 10_000L,
+                    currentPlaySessionId = oldPlaySessionId.takeIf { it.isNotEmpty() }  // 传入旧会话ID
                 )
                 .onSuccess { resolved ->
+                    // ⚠️ 关键修复：删除旧的转码会话（与网页端一致）
+                    if (oldPlaySessionId.isNotEmpty() && resolved.playSessionId != oldPlaySessionId) {
+                        playbackReporter?.deleteOldTranscodingSession(oldPlaySessionId)
+                    }
+                    
                     streamUrlOverrides[item.id] = resolved.streamUrl
                     val resolvedSourceId = resolved.mediaSourceId
                     if (!resolvedSourceId.isNullOrBlank()) {
@@ -747,6 +1114,15 @@ fun FavoritesPlayerScreen(
                                 resumeAtMs = resumeAt,
                                 shouldPlay = shouldPlay
                             )
+                            
+                            // ⚠️ 关键修复：上报qualitychange事件（与网页端一致）
+                            if (resolved.playSessionId != null) {
+                                playbackReporter?.onUserAction(
+                                    eventName = com.lalakiop.embyx.data.remote.model.ProgressEvent.TIME_UPDATE,  // 使用TIME_UPDATE代替qualitychange
+                                    positionMs = resumeAt,
+                                    isPaused = !shouldPlay
+                                )
+                            }
                         }.onFailure { throwable ->
                             qualityErrorMessage = throwable.message ?: "切换清晰度失败"
                             streamUrlOverrides[item.id] = item.streamUrl
@@ -775,6 +1151,9 @@ fun FavoritesPlayerScreen(
         val showIncomingContainer = shouldShowIncomingContainer && inactiveHasExpectedVideo
         val inactiveBaseOffset = if (pendingPageDelta >= 0) travelHeightPx else -travelHeightPx
         val hideSwipeVisual = isDraggingPreview || pendingPageDelta != 0 || switchMaskHold
+        // activeSlotIsLoading 未使用，已移除
+        val activeSlotBitrateEstimate = if (activeSlot == 0) slot0BitrateEstimate else slot1BitrateEstimate
+        // 优化：使用动态计算的 showLoadingOverlay，仅在缓冲超过2秒时显示
 
         AndroidView(
             modifier = Modifier
@@ -991,6 +1370,37 @@ fun FavoritesPlayerScreen(
                     }
                 }
         )
+
+        AnimatedVisibility(
+            visible = showLoadingOverlay,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.Center)
+                .zIndex(4.7f)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = Color.Black.copy(alpha = 0.72f)
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.5.dp)
+                    Text(
+                        text = if (activeSlotBitrateEstimate > 0L) {
+                            "加载中 ${formatNetworkSpeed(activeSlotBitrateEstimate)}"
+                        } else {
+                            "加载中..."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White
+                    )
+                }
+            }
+        }
 
         AnimatedVisibility(
             visible = topAreaVisible,
@@ -1481,12 +1891,11 @@ private fun qualityBadgeText(preset: PlaybackQualityPreset?): String {
     val id = preset?.id ?: return "清"
     return when (id) {
         PlaybackQualityPresets.ORIGINAL.id -> "原"
-        PlaybackQualityPresets.P1440_40M.id -> "2K40"
-        PlaybackQualityPresets.P1440_20M.id -> "2K20"
+        PlaybackQualityPresets.P1080_60M.id -> "1080-60"
         PlaybackQualityPresets.P1080_20M.id -> "1080-20"
-        PlaybackQualityPresets.P1080_10M.id -> "1080-10"
-        PlaybackQualityPresets.P720_10M.id -> "720-10"
-        PlaybackQualityPresets.P720_5M.id -> "720-5"
+        PlaybackQualityPresets.P1080_8M.id -> "1080-8"
+        PlaybackQualityPresets.P720_4M.id -> "720-4"
+        PlaybackQualityPresets.P720_2M.id -> "720-2"
         else -> "清"
     }
 }
@@ -1570,6 +1979,18 @@ private fun formatPlaybackSpeed(speed: Float): String {
         rounded.toInt().toString()
     } else {
         "%.2f".format(rounded).trimEnd('0').trimEnd('.')
+    }
+}
+
+private fun formatNetworkSpeed(bitrateBitsPerSecond: Long): String {
+    if (bitrateBitsPerSecond <= 0L) return "0 B/s"
+    val bytesPerSecond = bitrateBitsPerSecond / 8.0
+    val kbPerSecond = bytesPerSecond / 1024.0
+    val mbPerSecond = kbPerSecond / 1024.0
+    return when {
+        mbPerSecond >= 1.0 -> "%.2f MB/s".format(mbPerSecond)
+        kbPerSecond >= 1.0 -> "%.1f KB/s".format(kbPerSecond)
+        else -> "%.0f B/s".format(bytesPerSecond)
     }
 }
 

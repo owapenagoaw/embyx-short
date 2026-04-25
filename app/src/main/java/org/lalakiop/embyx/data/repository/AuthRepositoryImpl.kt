@@ -28,7 +28,8 @@ class AuthRepositoryImpl(
         return runCatching {
             val api = apiClientFactory.createAuthApi(normalizedServer)
             val response = api.authenticateByName(
-                authorization = "Emby Client=\"EmbyXNative\", Device=\"Android\", DeviceId=\"EmbyXNative-Device\", Version=\"0.1.0\"",
+                // ⚠️ 关键修复：伪装成Emby Web客户端
+                authorization = "Emby Client=\"Emby Web\", Device=\"Edge Windows\", DeviceId=\"027b1582-1688-4224-b16b-cc7b6ed96ce5\", Version=\"4.9.1.80\"",
                 body = AuthRequest(username = username.trim(), password = password)
             )
 

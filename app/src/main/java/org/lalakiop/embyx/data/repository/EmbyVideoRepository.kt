@@ -140,7 +140,8 @@ class EmbyVideoRepository(
         itemId: String,
         preset: PlaybackQualityPreset,
         mediaSourceId: String?,
-        startTimeTicks: Long
+        startTimeTicks: Long,
+        currentPlaySessionId: String?
     ): Result<ResolvedPlaybackStream> {
         return runCatching {
             val session = sessionStore.sessionFlow.first()
@@ -152,14 +153,24 @@ class EmbyVideoRepository(
                 server = session.server,
                 token = session.token
             )
+            
+            // ⚠️ 调试日志：打印请求参数
+            android.util.Log.d("EmbyVideoRepo", "=== /PlaybackInfo Request ===")
+            android.util.Log.d("EmbyVideoRepo", "itemId: $itemId")
+            android.util.Log.d("EmbyVideoRepo", "preset.id: ${preset.id}")
+            android.util.Log.d("EmbyVideoRepo", "preset.label: ${preset.label}")
+            android.util.Log.d("EmbyVideoRepo", "maxStreamingBitrate: ${preset.maxStreamingBitrate}")
+            android.util.Log.d("EmbyVideoRepo", "maxWidth: ${preset.maxWidth}")
+            android.util.Log.d("EmbyVideoRepo", "currentPlaySessionId: $currentPlaySessionId")
 
             val response = api.postPlaybackInfo(
                 itemId = itemId,
                 userId = session.userId,
                 startTimeTicks = startTimeTicks.coerceAtLeast(0L),
                 mediaSourceId = mediaSourceId,
-                maxStreamingBitrate = preset.maxStreamingBitrate,
-                body = buildPlaybackInfoRequest(maxWidth = preset.maxWidth)
+                // ⚠️ 关键修复：移除maxStreamingBitrate查询参数，只使用Body中的DeviceProfile
+                currentPlaySessionId = currentPlaySessionId,  // ⚠️ 传入旧会话ID
+                body = buildPlaybackInfoRequest(maxWidth = preset.maxWidth, maxStreamingBitrate = preset.maxStreamingBitrate)  // ⚠️ 码率限制在DeviceProfile中
             )
 
             if (!response.isSuccessful) {
@@ -170,20 +181,39 @@ class EmbyVideoRepository(
                 !src.transcodingUrl.isNullOrBlank() || !src.directStreamUrl.isNullOrBlank() || !src.path.isNullOrBlank()
             }
                 ?: throw IllegalStateException("切换清晰度失败: 未返回可播放媒体源")
+            
+            // ⚠️ 调试日志：打印服务器响应
+            android.util.Log.d("EmbyVideoRepo", "=== /PlaybackInfo Response ===")
+            android.util.Log.d("EmbyVideoRepo", "transcodingUrl存在: ${!source.transcodingUrl.isNullOrBlank()}")
+            android.util.Log.d("EmbyVideoRepo", "directStreamUrl存在: ${!source.directStreamUrl.isNullOrBlank()}")
+            android.util.Log.d("EmbyVideoRepo", "path存在: ${!source.path.isNullOrBlank()}")
+            android.util.Log.d("EmbyVideoRepo", "transcodingUrl: ${source.transcodingUrl?.take(150)}")
+            android.util.Log.d("EmbyVideoRepo", "directStreamUrl: ${source.directStreamUrl?.take(150)}")
+            android.util.Log.d("EmbyVideoRepo", "playSessionId: ${response.body()?.playSessionId}")
 
             val resolvedUrl = resolvePlaybackUrl(
                 server = session.server,
                 token = session.token,
                 sourcePath = source.transcodingUrl ?: source.directStreamUrl ?: source.path
             ) ?: "${session.server}/emby/Videos/$itemId/stream?Static=true&api_key=${session.token}&MaxStreamingBitrate=${preset.maxStreamingBitrate}"
+            
+            // ⚠️ 调试日志：打印最终URL
+            android.util.Log.d("EmbyVideoRepo", "=== Final Playback URL ===")
+            android.util.Log.d("EmbyVideoRepo", "resolvedUrl: $resolvedUrl")
+            android.util.Log.d("EmbyVideoRepo", "isTranscoding: ${source.transcodingUrl != null}")
+            android.util.Log.d("EmbyVideoRepo", "===========================")
 
             if (resolvedUrl.isBlank()) {
                 throw IllegalStateException("切换清晰度失败: 返回播放地址为空")
             }
 
+            // ⚠️ 关键：获取服务器生成的PlaySessionId
+            val serverPlaySessionId = response.body()?.playSessionId
+
             ResolvedPlaybackStream(
                 streamUrl = resolvedUrl,
-                mediaSourceId = source.id
+                mediaSourceId = source.id,
+                playSessionId = serverPlaySessionId  // 使用服务器生成的ID
             )
         }.recoverCatching { throwable ->
             when (throwable) {
@@ -374,11 +404,17 @@ class EmbyVideoRepository(
         }.getOrDefault(0)
     }
 
-    private fun buildPlaybackInfoRequest(maxWidth: Int): PlaybackInfoRequest {
+    private fun buildPlaybackInfoRequest(maxWidth: Int, maxStreamingBitrate: Int): PlaybackInfoRequest {
+        // ⚠️ 调试日志：打印DeviceProfile
+        android.util.Log.d("EmbyVideoRepo", "=== Building DeviceProfile ===")
+        android.util.Log.d("EmbyVideoRepo", "maxStaticBitrate: $maxStreamingBitrate")
+        android.util.Log.d("EmbyVideoRepo", "maxStreamingBitrate: $maxStreamingBitrate")
+        android.util.Log.d("EmbyVideoRepo", "maxWidth in codecProfiles: $maxWidth")
+        
         return PlaybackInfoRequest(
             deviceProfile = DeviceProfileRequest(
-                maxStaticBitrate = 140_000_000,
-                maxStreamingBitrate = 140_000_000,
+                maxStaticBitrate = maxStreamingBitrate,  // ⚠️ 关键修复：使用传入的码率限制
+                maxStreamingBitrate = maxStreamingBitrate,  // ⚠️ 关键修复：使用传入的码率限制
                 musicStreamingTranscodingBitrate = 192_000,
                 directPlayProfiles = listOf(
                     DirectPlayProfileRequest(
@@ -409,6 +445,12 @@ class EmbyVideoRepository(
                         type = "Video",
                         codec = "h264",
                         conditions = listOf(
+                            // ⚠️ 关键修复：添加VideoBitrate条件，强制服务器在码率超过限制时转码
+                            CodecConditionRequest(
+                                condition = "LessThanEqual",
+                                property = "VideoBitrate",  // ⚠️ 视频码率必须≤maxStreamingBitrate
+                                value = maxStreamingBitrate.toString()
+                            ),
                             CodecConditionRequest(
                                 condition = "LessThanEqual",
                                 property = "VideoLevel",
@@ -425,6 +467,12 @@ class EmbyVideoRepository(
                         type = "Video",
                         codec = "hevc",
                         conditions = listOf(
+                            // ⚠️ 关键修复：添加VideoBitrate条件
+                            CodecConditionRequest(
+                                condition = "LessThanEqual",
+                                property = "VideoBitrate",
+                                value = maxStreamingBitrate.toString()
+                            ),
                             CodecConditionRequest(
                                 condition = "EqualsAny",
                                 property = "VideoCodecTag",

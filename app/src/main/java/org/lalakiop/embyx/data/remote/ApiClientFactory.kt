@@ -20,6 +20,11 @@ class ApiClientFactory {
         return retrofit.create(EmbyMediaApi::class.java)
     }
 
+    fun createPlaybackApi(server: String, token: String): EmbyPlaybackApi {
+        val retrofit = createRetrofit(server = server, token = token)
+        return retrofit.create(EmbyPlaybackApi::class.java)
+    }
+
     private fun createRetrofit(server: String, token: String?): Retrofit {
         val baseUrl = if (server.endsWith('/')) server else "$server/"
 
@@ -47,7 +52,8 @@ class ApiClientFactory {
             val request = chain.request().newBuilder()
                 .header(
                     "X-Emby-Authorization",
-                    "Emby Client=\"EmbyXNative\", Device=\"Android\", DeviceId=\"EmbyXNative-Device\", Version=\"0.1.0\""
+                    // ⚠️ 关键修复：伪装成Emby Web客户端，让服务器使用Web端的转码逻辑
+                    "Emby Client=\"Emby Web\", Device=\"Edge Windows\", DeviceId=\"027b1582-1688-4224-b16b-cc7b6ed96ce5\", Version=\"4.9.1.80\""
                 )
                 .build()
             return chain.proceed(request)

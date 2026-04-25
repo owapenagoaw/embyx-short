@@ -35,7 +35,8 @@ data class UserDataDto(
 )
 
 data class PlaybackInfoResponse(
-    @SerializedName("MediaSources") val mediaSources: List<MediaSourceDto>?
+    @SerializedName("MediaSources") val mediaSources: List<MediaSourceDto>?,
+    @SerializedName("PlaySessionId") val playSessionId: String? = null  // ⚠️ 新增：服务器生成的会话ID
 )
 
 data class MediaSourceDto(

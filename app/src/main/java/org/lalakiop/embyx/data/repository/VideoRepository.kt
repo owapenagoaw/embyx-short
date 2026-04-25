@@ -21,7 +21,8 @@ interface VideoRepository {
         itemId: String,
         preset: PlaybackQualityPreset,
         mediaSourceId: String? = null,
-        startTimeTicks: Long = 0L
+        startTimeTicks: Long = 0L,
+        currentPlaySessionId: String? = null  // ⚠️ 新增：切换清晰度时传入旧会话ID
     ): Result<ResolvedPlaybackStream>
 
     suspend fun setFavorite(itemId: String, favorite: Boolean): Result<Unit>
